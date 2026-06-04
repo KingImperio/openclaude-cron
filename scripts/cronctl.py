@@ -325,9 +325,9 @@ def cmd_test(args):
 
 def _daemon_cmd(action):
     """Run a daemon command (start/stop/status)."""
-    daemon_script = os.path.join(get_script_dir(), "cron-daemon.sh")
+    daemon_py = os.path.join(get_script_dir(), "cron_daemon.py")
     result = subprocess.run(
-        ["bash", daemon_script, action],
+        [sys.executable, daemon_py, action],
         capture_output=True, text=True
     )
     if result.stdout:
