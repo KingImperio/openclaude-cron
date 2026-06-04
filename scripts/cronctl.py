@@ -107,6 +107,12 @@ def cmd_add(args):
 
     task_id, schedule, prompt = args[0], args[1], " ".join(args[2:])
 
+    # Try human-readable schedule parsing
+    parsed = parse_human_schedule(schedule)
+    if parsed:
+        print(f"  Interpreted '{schedule}' as '{parsed}'")
+        schedule = parsed
+
     if not valid_task_id(task_id):
         print(f"Error: invalid task ID '{task_id}' (alphanumeric, hyphens, underscores, 1-64 chars)")
         sys.exit(1)
@@ -317,6 +323,146 @@ def cmd_test(args):
         print("Result: NO MATCH")
 
 
+def _daemon_cmd(action):
+    """Run a daemon command (start/stop/status)."""
+    daemon_script = os.path.join(get_script_dir(), "cron-daemon.sh")
+    result = subprocess.run(
+        ["bash", daemon_script, action],
+        capture_output=True, text=True
+    )
+    if result.stdout:
+        print(result.stdout, end="")
+    if result.stderr:
+        print(result.stderr, end="", file=sys.stderr)
+    return result.returncode
+
+
+def cmd_start(_args):
+    print("Starting daemon...")
+    rc = _daemon_cmd("start")
+    if rc == 0:
+        print("Done. Use 'cronctl.py status' to check.")
+    sys.exit(rc)
+
+
+def cmd_stop(_args):
+    print("Stopping daemon...")
+    rc = _daemon_cmd("stop")
+    if rc == 0:
+        print("Done.")
+    sys.exit(rc)
+
+
+def cmd_status(_args):
+    rc = _daemon_cmd("status")
+    sys.exit(rc)
+
+
+# ── Human-readable schedule parsing ────────────────────────────────────────────
+NAMED_SCHEDULES = {
+    "minutely":  "* * * * *",
+    "hourly":    "0 * * * *",
+    "daily":     "0 0 * * *",
+    "weekly":    "0 0 * * 0",
+    "monthly":   "0 0 1 * *",
+    "yearly":    "0 0 1 1 *",
+    "annually":  "0 0 1 1 *",
+    "weekdays":  "0 9 * * 1-5",
+    "weekends":  "0 9 * * 0,6",
+}
+
+
+def parse_human_schedule(text):
+    """Try to parse human-readable schedule. Returns cron expr or None."""
+    text = text.lower().strip()
+
+    # Named schedules
+    if text in NAMED_SCHEDULES:
+        return NAMED_SCHEDULES[text]
+
+    # "every N minutes/hours/days"
+    import re
+    m = re.match(r'every\s+(\d+)\s+(minute|hour|day)s?', text)
+    if m:
+        n = int(m.group(1))
+        unit = m.group(2)
+        if unit == "minute":
+            if 60 % n != 0:
+                return None  # doesn't divide evenly
+            return f"*/{n} * * * *"
+        elif unit == "hour":
+            if 24 % n != 0:
+                return None
+            return f"0 */{n} * * *"
+        elif unit == "day":
+            return f"0 0 */{n} * *"
+
+    # "at HH:MM"
+    m = re.match(r'at\s+(\d{1,2}):(\d{2})', text)
+    if m:
+        h, mi = int(m.group(1)), int(m.group(2))
+        if 0 <= h <= 23 and 0 <= mi <= 59:
+            return f"{mi} {h} * * *"
+
+    # "at Npm/am"
+    m = re.match(r'at\s+(\d{1,2})(am|pm)', text)
+    if m:
+        h = int(m.group(1))
+        if m.group(2) == "pm" and h != 12:
+            h += 12
+        if m.group(2) == "am" and h == 12:
+            h = 0
+        if 0 <= h <= 23:
+            return f"0 {h} * * *"
+
+    return None
+
+
+def cmd_help(_args):
+    print("""OpenClaude Cron — Persistent background task scheduler
+
+USAGE
+  cronctl.py <command> [args]
+
+COMMANDS
+  list                          Show all scheduled tasks
+  add <id> <schedule> <prompt>  Add a task (schedule can be cron expr or human-readable)
+  remove <id>                   Remove a task
+  enable <id>                   Enable a task
+  disable <id>                  Disable a task
+  run <id>                      Execute a task now (one-shot)
+  log <id> [lines]              View task logs (default: 20 lines)
+  test <cron-expr>              Test a cron expression against current time
+  start                         Start the background daemon
+  stop                          Stop the background daemon
+  status                        Check daemon status
+  help                          Show this help
+
+HUMAN-READABLE SCHEDULES (for 'add')
+  "every 5 minutes"             → */5 * * * *
+  "every 2 hours"               → 0 */2 * * *
+  "daily"                       → 0 0 * * *
+  "weekdays"                    → 0 9 * * 1-5
+  "at 14:30"                    → 30 14 * * *
+  "at 9am"                      → 0 9 * * *
+  "weekly"                      → 0 0 * * 0
+
+CRON EXPRESSION FORMAT
+  ┌────── minute (0-59)
+  │ ┌──── hour (0-23)
+  │ │ ┌── day of month (1-31)
+  │ │ │ ┌ month (1-12)
+  │ │ │ │ ┌ day of week (0-7, 0=7=Sun)
+  * * * * *
+
+EXAMPLES
+  */15 * * * *        Every 15 minutes
+  0 9 * * 1-5         Weekdays at 9:00
+  30 2 1,15 * *       2:30am on 1st and 15th
+  0 0 * * 0           Every Sunday midnight
+""")
+
+
 def main():
     if len(sys.argv) < 2:
         print(__doc__)
@@ -334,6 +480,10 @@ def main():
         "run": lambda: cmd_run(args),
         "log": lambda: cmd_log(args),
         "test": lambda: cmd_test(args),
+        "start": lambda: cmd_start(args),
+        "stop": lambda: cmd_stop(args),
+        "status": lambda: cmd_status(args),
+        "help": lambda: cmd_help(args),
     }
 
     if cmd not in commands:
