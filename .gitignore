@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pid
+*.lock
+*.log
+*.tmp
+*.corrupted
+*.swp
+*.swo
+*~
+.DS_Store

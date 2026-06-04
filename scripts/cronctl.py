@@ -116,11 +116,34 @@ def cmd_add(args):
         print(f"Error: cron expression must have 5 fields, got {len(fields)}")
         sys.exit(1)
 
-    # Validate each field contains only valid cron characters
+    # Validate each cron field structurally
     for i, field in enumerate(fields):
         if not re.match(r'^[\d\*\/\-\,]+$', field):
-            print(f"Error: invalid cron field '{field}' (field {i+1})")
+            print(f"Error: invalid cron field '{field}' (field {i+1}) — only digits, *, /, -, , allowed")
             sys.exit(1)
+        # Check for structural issues
+        if field.startswith('-') or field.endswith('-'):
+            print(f"Error: invalid cron field '{field}' (field {i+1}) — range must have both endpoints")
+            sys.exit(1)
+        if '//' in field:
+            print(f"Error: invalid cron field '{field}' (field {i+1}) — double slash not allowed")
+            sys.exit(1)
+        if ',,' in field:
+            print(f"Error: invalid cron field '{field}' (field {i+1}) — empty list segment")
+            sys.exit(1)
+        # Validate range endpoints and step are numeric
+        for part in field.split('/'):
+            for segment in part.split(','):
+                if '-' in segment:
+                    lo, hi = segment.split('-', 1)
+                    if not lo.isdigit() or not hi.isdigit():
+                        print(f"Error: invalid range '{segment}' in field {i+1} — endpoints must be numbers")
+                        sys.exit(1)
+        if '/' in field:
+            step_part = field.rsplit('/', 1)[1]
+            if not step_part.isdigit() or int(step_part) < 1:
+                print(f"Error: invalid step '{step_part}' in field {i+1} — must be positive integer")
+                sys.exit(1)
 
     if len(prompt) > MAX_PROMPT_LENGTH:
         print(f"Error: prompt too long ({len(prompt)} chars, max {MAX_PROMPT_LENGTH})")

@@ -18,6 +18,7 @@ TASKS_FILE = os.path.expanduser("~/.openclaude/cron/cron-tasks.json")
 
 def expand_field(field, lo, hi):
     """Expand a single cron field into a set of matching integers."""
+    MAX_RANGE = 1000  # prevent memory DoS from absurd ranges like 0-999999999
     result = set()
     for part in field.split(","):
         part = part.strip()
@@ -30,12 +31,19 @@ def expand_field(field, lo, hi):
         if "/" in part:
             range_part, step_str = part.rsplit("/", 1)
             step = int(step_str)
+            if step < 1:
+                raise ValueError(f"step must be >= 1, got {step}")
 
         if range_part == "*":
             vals = range(lo, hi + 1)
         elif "-" in range_part:
             rlo, rhi = range_part.split("-", 1)
-            vals = range(int(rlo), int(rhi) + 1)
+            if not rlo.isdigit() or not rhi.isdigit():
+                raise ValueError(f"invalid range endpoints: {range_part}")
+            rlo, rhi = int(rlo), int(rhi)
+            if rhi - rlo > MAX_RANGE:
+                raise ValueError(f"range too large: {range_part} (max {MAX_RANGE} values)")
+            vals = range(rlo, rhi + 1)
         else:
             vals = [int(range_part)]
 
@@ -133,7 +141,12 @@ def cmd_due_tasks(args):
     for task in tasks:
         if not task.get("enabled", True):
             continue
-        if cron_matches(task["schedule"], cur_min, cur_hour, cur_dom, cur_month, cur_dow):
+        try:
+            is_due = cron_matches(task["schedule"], cur_min, cur_hour, cur_dom, cur_month, cur_dow)
+        except (ValueError, IndexError) as e:
+            print(f"WARN: skipping task '{task.get('id', '?')}' — bad cron expression: {e}", file=sys.stderr)
+            continue
+        if is_due:
             # Output: id|schedule|prompt (prompt may contain pipes — use \n as delimiter instead)
             task_id = task["id"]
             schedule = task["schedule"]
