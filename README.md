@@ -48,6 +48,7 @@ Opens a full-screen menu where you can navigate with arrow keys and select actio
 ```
 /cron list                        — Show all scheduled tasks
 /cron add my-task "*/5 * * * *" "check deploy status"
+/cron add my-task "every 5 minutes" "check deploy status"   ← human-readable!
 /cron remove my-task
 /cron enable my-task
 /cron disable my-task
@@ -57,16 +58,36 @@ Opens a full-screen menu where you can navigate with arrow keys and select actio
 /cron status                      — Check daemon status
 /cron log my-task                 — View task logs
 /cron test "*/15 * * * *"        — Test cron expression
+/cron help                        — Show full usage docs
 ```
 
 ### Standalone CLI (outside OpenClude)
 
 ```bash
+python3 ~/.claude/skills/cron/scripts/cronctl.py help         # full usage docs
 python3 ~/.claude/skills/cron/scripts/cronctl.py list
+python3 ~/.claude/skills/cron/scripts/cronctl.py add my-task "every 5 minutes" "check deploy"
 python3 ~/.claude/skills/cron/scripts/cronctl.py add my-task "0 9 * * 1-5" "review open PRs"
 python3 ~/.claude/skills/cron/scripts/cronctl.py run my-task
-python3 ~/.claude/skills/cron/scripts/cronctl.py start  # note: daemon start uses cron-daemon.sh
+python3 ~/.claude/skills/cron/scripts/cronctl.py start
+python3 ~/.claude/skills/cron/scripts/cronctl.py stop
+python3 ~/.claude/skills/cron/scripts/cronctl.py status
 ```
+
+### Human-Readable Schedules
+
+You don't need to know cron syntax. These all work:
+
+| Input | Parsed As |
+|---|---|
+| `every 5 minutes` | `*/5 * * * *` |
+| `every 2 hours` | `0 */2 * * *` |
+| `daily` | `0 0 * * *` |
+| `hourly` | `0 * * * *` |
+| `weekly` | `0 0 * * 0` |
+| `weekdays` | `0 9 * * 1-5` |
+| `at 9am` | `0 9 * * *` |
+| `at 14:30` | `30 14 * * *` |
 
 ## Architecture
 

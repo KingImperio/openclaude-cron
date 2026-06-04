@@ -57,17 +57,22 @@ python3 $HOME/.claude/skills/cron/scripts/cronctl.py run "$ID"
 
 ### `start`
 ```bash
-bash $HOME/.claude/skills/cron/scripts/cron-daemon.sh start
+python3 $HOME/.claude/skills/cron/scripts/cronctl.py start
 ```
 
 ### `stop`
 ```bash
-bash $HOME/.claude/skills/cron/scripts/cron-daemon.sh stop
+python3 $HOME/.claude/skills/cron/scripts/cronctl.py stop
 ```
 
 ### `status`
 ```bash
-bash $HOME/.claude/skills/cron/scripts/cron-daemon.sh status
+python3 $HOME/.claude/skills/cron/scripts/cronctl.py status
+```
+
+### `help`
+```bash
+python3 $HOME/.claude/skills/cron/scripts/cronctl.py help
 ```
 
 ### `log <id> [lines]`
