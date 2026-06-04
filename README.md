@@ -119,7 +119,7 @@ You don't need to know cron syntax. These all work:
 
 1. **Daemon** (`cron_daemon.py`) runs as a persistent Python process — no cold-start per tick
 2. Every 60 seconds, it calls `cron_json_helper.py due-tasks` to find enabled tasks matching the current time
-3. Due tasks execute via `openclaude -p "<prompt>" --dangerously-skip-permissions` in separate process groups
+3. Due tasks execute via `openclaude -p "<prompt>"` in separate process groups
 4. Results are logged to `~/.openclaude/cron/logs/<task-id>.log`
 5. Concurrency limit (default: 3) prevents resource exhaustion
 6. **Catch-up**: after sleep/hibernate, missed ticks are detected and executed
@@ -154,8 +154,10 @@ Environment variables (optional):
 
 ## Security Notes
 
-- Tasks run with `--dangerously-skip-permissions`. Only schedule prompts you trust.
+- Tasks run with `openclaude -p`. Only schedule prompts you trust — they execute with your full permissions.
 - The daemon runs as your user. Tasks have the same file access as your shell.
+- Task prompts are stored in plain text in `~/.openclaude/cron/cron-tasks.json`.
+- Logs may contain full AI output — be mindful of sensitive data.
 - Task prompts are stored in plain text in `~/.openclaude/cron/cron-tasks.json`.
 - Logs may contain full AI output — be mindful of sensitive data.
 

@@ -105,8 +105,10 @@ python3 $HOME/.claude/skills/cron/scripts/cronctl.py test "$EXPRESSION"
 
 ## Security Notes
 
-- Tasks run with `--dangerously-skip-permissions`. Only schedule prompts you trust.
+- Tasks run with `openclaude -p`. Only schedule prompts you trust — they execute with your full permissions.
 - The daemon runs as your user. Tasks have the same file access as your shell.
+- Task prompts are stored in plain text in `~/.openclaude/cron/cron-tasks.json`.
+- Logs may contain full AI output — be mindful of sensitive data.
 - Task prompts are stored in plain text in `~/.openclaude/cron/cron-tasks.json`.
 - Logs may contain full AI output — be mindful of sensitive data.
 
