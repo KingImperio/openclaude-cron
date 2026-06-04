@@ -5,18 +5,21 @@ cron_daemon.py — Persistent Python daemon for OpenClaude cron.
 Replaces the Bash daemon loop to eliminate Python cold-start on every tick.
 Features:
   - Persistent Python interpreter (no fork-per-tick)
-  - Catch-up after sleep/hibernate (runs missed ticks)
+  - Catch-up after sleep/hibernate (runs missed ticks at correct times)
   - Heartbeat file for health monitoring
   - Signal handling for graceful shutdown
   - One bad task doesn't skip all others
+  - File locking prevents data races
 """
+import fcntl
 import json
 import os
 import signal
 import subprocess
 import sys
+import tempfile
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 DATA_DIR = os.path.expanduser("~/.openclaude/cron")
@@ -25,16 +28,30 @@ PID_FILE = os.path.join(DATA_DIR, "cron.pid")
 HEARTBEAT_FILE = os.path.join(DATA_DIR, "heartbeat")
 HEARTBEAT_STALE_SECONDS = 180  # 3x tick = stale
 LOG_DIR = os.path.join(DATA_DIR, "logs")
-RUNNING_DIR = os.path.join(DATA_DIR, "running")
 JSON_HELPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cron_json_helper.py")
 OPENCLAUDE_BIN = os.environ.get("OPENCLAUDE_BIN", "openclaude")
+
+# Validate OPENCLAUDE_BIN points to a real binary
+def _validate_bin():
+    """Check OPENCLAUDE_BIN exists and is not a symlink to somewhere unexpected."""
+    import shutil
+    resolved = shutil.which(OPENCLAUDE_BIN)
+    if not resolved:
+        print(f"ERROR: '{OPENCLAUDE_BIN}' not found in PATH", file=sys.stderr)
+        sys.exit(1)
+    # Warn if it's a symlink (not blocking, but audible)
+    if os.path.islink(OPENCLAUDE_BIN):
+        real = os.path.realpath(OPENCLAUDE_BIN)
+        print(f"WARN: OPENCLAUDE_BIN={OPENCLAUDE_BIN} is a symlink -> {real}", file=sys.stderr)
+
+_validate_bin()
 
 TICK_INTERVAL = int(os.environ.get("CRON_TICK_INTERVAL", "60"))
 TASK_TIMEOUT = int(os.environ.get("CRON_TIMEOUT", "300"))
 MAX_CONCURRENT = int(os.environ.get("CRON_MAX_CONCURRENT", "3"))
 
 # ── State ──────────────────────────────────────────────────────────────────────
-running_tasks = {}  # task_id -> pid
+running_tasks = {}  # task_id -> proc
 shutdown_requested = False
 
 
@@ -44,25 +61,68 @@ def handle_signal(signum, frame):
     shutdown_requested = True
 
 
+# ── File Locking ───────────────────────────────────────────────────────────────
+def load_tasks_locked():
+    """Load tasks with file lock held."""
+    if not os.path.exists(TASKS_FILE):
+        return {"tasks": []}
+    try:
+        with open(TASKS_FILE) as f:
+            fcntl.flock(f, fcntl.LOCK_SH)
+            try:
+                data = json.load(f)
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
+        return data
+    except (json.JSONDecodeError, OSError):
+        return {"tasks": []}
+
+
+def save_tasks_locked(data):
+    """Save tasks with exclusive file lock."""
+    os.makedirs(os.path.dirname(TASKS_FILE), exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(
+        dir=os.path.dirname(TASKS_FILE), suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            try:
+                json.dump(data, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
+        os.replace(tmp_path, TASKS_FILE)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
 # ── Task Execution ─────────────────────────────────────────────────────────────
-def get_running_count():
-    """Count running task marker files."""
-    if not os.path.isdir(RUNNING_DIR):
-        return 0
-    return len([f for f in os.listdir(RUNNING_DIR) if f.endswith(".pid")])
-
-
 def run_task(task_id, prompt):
     """Execute a task via openclaude -p in a subprocess."""
+    # Validate task_id (defense-in-depth: daemon re-validates what JSON says)
+    if not task_id or not task_id.strip():
+        return
+    import re
+    if not re.match(r'^[a-zA-Z0-9_-]{1,64}$', task_id):
+        print(f"WARN: Skipping task with invalid ID: '{task_id}'", file=sys.stderr)
+        return
+
     if task_id in running_tasks:
-        pid = running_tasks[task_id]
+        proc = running_tasks[task_id]
         try:
-            os.kill(pid, 0)
+            os.kill(proc.pid, 0)
             return  # already running
         except OSError:
             del running_tasks[task_id]
 
-    if get_running_count() >= MAX_CONCURRENT:
+    # Use in-memory count (not file-based — files are never populated)
+    if len(running_tasks) >= MAX_CONCURRENT:
         print(f"WARN: Concurrency limit ({MAX_CONCURRENT}) reached — skipping '{task_id}'", file=sys.stderr)
         return
 
@@ -70,45 +130,59 @@ def run_task(task_id, prompt):
     os.makedirs(LOG_DIR, exist_ok=True)
 
     # Launch task in subprocess (non-blocking)
+    # No --dangerously-skip-permissions: relies on settings.json Bash(*) config
+    log_fh = open(logfile, "a")
     proc = subprocess.Popen(
         [OPENCLAUDE_BIN, "-p", prompt,
-         "--dangerously-skip-permissions",
          "--output-format", "text"],
-        stdout=open(logfile, "a"),
+        stdout=log_fh,
         stderr=subprocess.STDOUT,
         preexec_fn=os.setsid,  # new process group for clean kill
     )
-    running_tasks[task_id] = proc.pid
+    log_fh.close()  # fd passed to child, parent can close
+    running_tasks[task_id] = proc
     print(f"INFO: Running task '{task_id}' (PID {proc.pid})", file=sys.stderr)
 
 
 def reap_finished():
     """Check for finished tasks and clean up."""
     finished = []
-    for task_id, pid in running_tasks.items():
+    for task_id, proc in running_tasks.items():
         try:
-            os.kill(pid, 0)
+            os.kill(proc.pid, 0)
         except OSError:
             finished.append(task_id)
 
     for task_id in finished:
         del running_tasks[task_id]
-        # Update last_run
+        # Update last_run with file locking
         try:
-            subprocess.run(
-                [sys.executable, JSON_HELPER, "update-last-run", task_id],
-                capture_output=True, timeout=5
-            )
+            data = load_tasks_locked()
+            for t in data.get("tasks", []):
+                if t["id"] == task_id:
+                    t["last_run"] = datetime.now().isoformat()
+                    break
+            save_tasks_locked(data)
         except Exception:
             pass
 
 
 # ── Heartbeat ──────────────────────────────────────────────────────────────────
 def write_heartbeat():
-    """Write current timestamp to heartbeat file."""
+    """Write current timestamp to heartbeat file (atomic)."""
     os.makedirs(DATA_DIR, exist_ok=True)
-    with open(HEARTBEAT_FILE, "w") as f:
-        f.write(datetime.now().isoformat())
+    fd, tmp_path = tempfile.mkstemp(
+        dir=DATA_DIR, suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(datetime.now().isoformat())
+        os.replace(tmp_path, HEARTBEAT_FILE)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
 
 
 def is_heartbeat_stale():
@@ -128,10 +202,20 @@ def is_heartbeat_stale():
 def daemon_loop():
     global shutdown_requested
 
-    # Write PID
+    # Write PID atomically
     os.makedirs(DATA_DIR, exist_ok=True)
-    with open(PID_FILE, "w") as f:
-        f.write(str(os.getpid()))
+    fd, tmp_path = tempfile.mkstemp(
+        dir=DATA_DIR, suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(str(os.getpid()))
+        os.replace(tmp_path, PID_FILE)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
 
     # Register signal handlers
     signal.signal(signal.SIGTERM, handle_signal)
@@ -145,7 +229,7 @@ def daemon_loop():
         now = time.time()
         elapsed = now - last_tick_time
 
-        # Catch-up: if we missed ticks (e.g. after sleep), run them
+        # Calculate missed ticks for catch-up
         missed_ticks = 0
         if elapsed > TICK_INTERVAL * 2:
             missed_ticks = int(elapsed / TICK_INTERVAL) - 1
@@ -155,15 +239,18 @@ def daemon_loop():
         # Reap finished tasks
         reap_finished()
 
-        # Check for due tasks (run catch-up ticks too)
+        # Run catch-up ticks + current tick, each with CORRECT timestamps
         ticks_to_run = 1 + missed_ticks
+        # Calculate the start time: go back missed_ticks * TICK_INTERVAL from now
+        tick_start = datetime.now() - timedelta(seconds=ticks_to_run * TICK_INTERVAL)
+
         for i in range(ticks_to_run):
-            # Get due tasks from Python helper
-            now_min = datetime.now().strftime("%-M")
-            now_hour = datetime.now().strftime("%-H")
-            now_dom = datetime.now().strftime("%-d")
-            now_month = datetime.now().strftime("%-m")
-            now_dow = datetime.now().strftime("%-w")
+            tick_time = tick_start + timedelta(seconds=(i + 1) * TICK_INTERVAL)
+            now_min = tick_time.strftime("%-M")
+            now_hour = tick_time.strftime("%-H")
+            now_dom = tick_time.strftime("%-d")
+            now_month = tick_time.strftime("%-m")
+            now_dow = tick_time.strftime("%-w")
 
             try:
                 result = subprocess.run(
@@ -183,8 +270,8 @@ def daemon_loop():
             except Exception as e:
                 print(f"ERROR: Failed to check tasks: {e}", file=sys.stderr)
 
-            # Write heartbeat after each tick
-            write_heartbeat()
+        # Write heartbeat after tick(s)
+        write_heartbeat()
 
         last_tick_time = time.time()
 
@@ -195,17 +282,16 @@ def daemon_loop():
 
     # Shutdown: kill running tasks
     print("INFO: Shutting down...", file=sys.stderr)
-    for task_id, pid in running_tasks.items():
+    for task_id, proc in running_tasks.items():
         try:
-            os.killpg(os.getpgid(pid), signal.SIGTERM)
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
         except OSError:
             pass
-    # Clean up
-    for f in [PID_FILE, HEARTBEAT_FILE]:
-        try:
-            os.unlink(f)
-        except OSError:
-            pass
+    # Clean up PID file
+    try:
+        os.unlink(PID_FILE)
+    except OSError:
+        pass
     print("INFO: Daemon stopped", file=sys.stderr)
 
 
@@ -299,8 +385,7 @@ def cmd_status():
     # Task count
     if os.path.exists(TASKS_FILE):
         try:
-            with open(TASKS_FILE) as f:
-                data = json.load(f)
+            data = load_tasks_locked()
             print(f"Tasks: {len(data.get('tasks', []))} configured")
         except (json.JSONDecodeError, OSError):
             print("Tasks: error reading tasks.json")

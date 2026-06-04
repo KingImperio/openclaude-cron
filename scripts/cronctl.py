@@ -18,6 +18,7 @@ import sys
 import subprocess
 import re
 import tempfile
+import fcntl
 from datetime import datetime
 
 TASKS_FILE = os.path.expanduser("~/.openclaude/cron/cron-tasks.json")
@@ -36,7 +37,11 @@ def load_tasks():
     ensure_file()
     try:
         with open(TASKS_FILE) as f:
-            return json.load(f)
+            fcntl.flock(f, fcntl.LOCK_SH)
+            try:
+                return json.load(f)
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
     except (json.JSONDecodeError, OSError) as e:
         print(f"Error: corrupted tasks.json: {e}", file=sys.stderr)
         # Backup corrupted file and start fresh
@@ -57,7 +62,13 @@ def save_tasks(data):
     )
     try:
         with os.fdopen(fd, "w") as f:
-            json.dump(data, f, indent=2)
+            fcntl.flock(f, fcntl.LOCK_EX)
+            try:
+                json.dump(data, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
         os.replace(tmp_path, TASKS_FILE)
     except Exception:
         try:
@@ -247,10 +258,10 @@ def cmd_run(args):
         sys.exit(1)
 
     prompt = task["prompt"]
+    openclade_bin = os.environ.get("OPENCLAUDE_BIN", "openclaude")
     print(f"Running task '{task_id}'...")
     result = subprocess.run(
-        ["openclaude", "-p", prompt,
-         "--dangerously-skip-permissions",
+        [openclade_bin, "-p", prompt,
          "--output-format", "text"],
         capture_output=True, text=True, timeout=300
     )

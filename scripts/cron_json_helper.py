@@ -8,9 +8,11 @@ Usage:
     cron_json_helper.py task-count
     cron_json_helper.py update-last-run <task-id>
 """
+import fcntl
 import json
 import os
 import sys
+import tempfile
 
 TASKS_FILE = os.path.expanduser("~/.openclaude/cron/cron-tasks.json")
 
@@ -99,27 +101,36 @@ def cron_matches(expr, cur_min, cur_hour, cur_dom, cur_month, cur_dow):
 # ── Task operations ────────────────────────────────────────────────────────────
 
 def load_tasks():
-    """Load tasks from JSON file. Returns empty list on any error."""
+    """Load tasks from JSON file with shared lock. Returns empty list on any error."""
     if not os.path.exists(TASKS_FILE):
         return []
     try:
         with open(TASKS_FILE) as f:
-            data = json.load(f)
+            fcntl.flock(f, fcntl.LOCK_SH)
+            try:
+                data = json.load(f)
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
         return data.get("tasks", [])
     except (json.JSONDecodeError, OSError):
         return []
 
 
 def save_tasks(tasks):
-    """Save tasks atomically. Uses tempfile for crash safety."""
-    import tempfile
+    """Save tasks atomically with exclusive lock."""
     os.makedirs(os.path.dirname(TASKS_FILE), exist_ok=True)
     tmp_fd, tmp_path = tempfile.mkstemp(
         dir=os.path.dirname(TASKS_FILE), suffix=".tmp"
     )
     try:
         with os.fdopen(tmp_fd, "w") as f:
-            json.dump({"tasks": tasks}, f, indent=2)
+            fcntl.flock(f, fcntl.LOCK_EX)
+            try:
+                json.dump({"tasks": tasks}, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
         os.replace(tmp_path, TASKS_FILE)
     except Exception:
         try:
