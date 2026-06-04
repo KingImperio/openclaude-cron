@@ -24,11 +24,13 @@ from datetime import datetime, timedelta
 # ── Config ─────────────────────────────────────────────────────────────────────
 DATA_DIR = os.path.expanduser("~/.openclaude/cron")
 TASKS_FILE = os.path.join(DATA_DIR, "cron-tasks.json")
+TASKS_LOCK = TASKS_FILE + ".lock"
 PID_FILE = os.path.join(DATA_DIR, "cron.pid")
 HEARTBEAT_FILE = os.path.join(DATA_DIR, "heartbeat")
 HEARTBEAT_STALE_SECONDS = 180  # 3x tick = stale
 LOG_DIR = os.path.join(DATA_DIR, "logs")
 MAX_LOG_LINES = 500
+MAX_LOG_DIR_SIZE = 10 * 1024 * 1024  # 10MB total log directory cap
 JSON_HELPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cron_json_helper.py")
 OPENCLAUDE_BIN = os.environ.get("OPENCLAUDE_BIN", "openclaude")
 
@@ -136,7 +138,6 @@ def run_task(task_id, prompt):
             with open(logfile) as lf:
                 line_count = sum(1 for _ in lf)
             if line_count > MAX_LOG_LINES:
-                import shutil
                 tmp = logfile + ".rot"
                 with open(logfile) as lf:
                     lines = lf.readlines()
@@ -146,9 +147,32 @@ def run_task(task_id, prompt):
     except OSError:
         pass
 
+    # Enforce total log directory size cap
+    try:
+        log_files = [(f, os.path.getsize(os.path.join(LOG_DIR, f)))
+                     for f in os.listdir(LOG_DIR) if f.endswith(".log")]
+        total = sum(s for _, s in log_files)
+        if total > MAX_LOG_DIR_SIZE:
+            # Remove oldest files first (by mtime) until under cap
+            log_files.sort(key=lambda x: os.path.getmtime(os.path.join(LOG_DIR, x[0])))
+            for fname, fsize in log_files:
+                if total <= MAX_LOG_DIR_SIZE * 0.8:
+                    break
+                try:
+                    os.unlink(os.path.join(LOG_DIR, fname))
+                    total -= fsize
+                except OSError:
+                    pass
+    except OSError:
+        pass
+
     # Launch task in subprocess (non-blocking)
     # No --dangerously-skip-permissions: relies on settings.json Bash(*) config
-    log_fh = open(logfile, "a", 0o600)
+    log_fh = open(logfile, "a", buffering=1)  # line-buffered
+    try:
+        os.chmod(logfile, 0o600)
+    except OSError:
+        pass
     proc = subprocess.Popen(
         [OPENCLAUDE_BIN, "-p", prompt,
          "--output-format", "text"],
@@ -316,6 +340,23 @@ def daemon_loop():
     print("INFO: Daemon stopped", file=sys.stderr)
 
 
+# ── Termux Wake Lock ─────────────────────────────────────────────────────────
+def _termux_wake_lock(acquire):
+    """Acquire or release a termux-wake-lock. No-op if not on Termux."""
+    import shutil
+    if not shutil.which("termux-wake-lock"):
+        return
+    try:
+        if acquire:
+            subprocess.Popen(["termux-wake-lock"],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            subprocess.Popen(["termux-wake-unlock"],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        pass
+
+
 # ── Entry Points ───────────────────────────────────────────────────────────────
 def cmd_start():
     """Start daemon in background."""
@@ -328,6 +369,9 @@ def cmd_start():
             sys.exit(1)
         except (OSError, ValueError):
             os.unlink(PID_FILE)
+
+    # Acquire termux wake lock if available (keeps CPU alive on Android)
+    _termux_wake_lock(True)
 
     # Fork to background
     pid = os.fork()
@@ -349,6 +393,7 @@ def cmd_stop():
     """Stop daemon by sending SIGTERM."""
     if not os.path.exists(PID_FILE):
         print("No daemon running")
+        _termux_wake_lock(False)
         return
 
     try:
@@ -363,6 +408,7 @@ def cmd_stop():
                 time.sleep(1)
             except OSError:
                 print("Daemon stopped")
+                _termux_wake_lock(False)
                 return
         # Force kill
         try:
@@ -373,10 +419,18 @@ def cmd_stop():
     except (ValueError, OSError) as e:
         print(f"Error: {e}")
     finally:
-        try:
-            os.unlink(PID_FILE)
-        except OSError:
-            pass
+        # Only remove PID file if daemon is actually dead
+        if os.path.exists(PID_FILE):
+            try:
+                with open(PID_FILE) as f:
+                    pid = int(f.read().strip())
+                os.kill(pid, 0)  # still alive
+            except (OSError, ValueError):
+                try:
+                    os.unlink(PID_FILE)
+                except OSError:
+                    pass
+        _termux_wake_lock(False)
 
 
 def cmd_status():

@@ -305,17 +305,22 @@ def cmd_run(args):
         sys.exit(1)
 
     task_id = args[0]
-    data = load_tasks()
-    task = next((t for t in data["tasks"] if t["id"] == task_id), None)
-    if not task:
-        print(f"Error: task '{task_id}' not found")
-        sys.exit(1)
+    prompt = [None]
 
-    prompt = task["prompt"]
+    def _get_prompt(tasks):
+        for t in tasks:
+            if t["id"] == task_id:
+                prompt[0] = t["prompt"]
+                return
+        raise SystemExit(f"Error: task '{task_id}' not found")
+
+    modify_tasks(_get_prompt)
+    # prompt[0] is set or SystemExit was raised
+
     openclade_bin = os.environ.get("OPENCLAUDE_BIN", "openclaude")
     print(f"Running task '{task_id}'...")
     result = subprocess.run(
-        [openclade_bin, "-p", prompt,
+        [openclade_bin, "-p", prompt[0],
          "--output-format", "text"],
         capture_output=True, text=True, timeout=300
     )
@@ -324,13 +329,14 @@ def cmd_run(args):
         print(result.stderr, file=sys.stderr, end="")
     print(f"Exit code: {result.returncode}")
 
-    # Update last_run
-    now = datetime.now().isoformat()
-    for t in data["tasks"]:
-        if t["id"] == task_id:
-            t["last_run"] = now
-            save_tasks(data)
-            break
+    # Update last_run (separate transaction, no stale data)
+    def _update_last_run(tasks):
+        for t in tasks:
+            if t["id"] == task_id:
+                t["last_run"] = datetime.now().isoformat()
+                return
+
+    modify_tasks(_update_last_run)
 
 
 def cmd_log(args):
