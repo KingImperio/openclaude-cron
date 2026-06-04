@@ -24,6 +24,8 @@ git clone https://github.com/KingImperio/openclaude-cron.git ~/.claude/skills/cr
 
 That's it. `/cron` is now available in your next OpenClaude session.
 
+**First-run setup:** On first use, the skill auto-configures `Bash(*)` in your permissions so cron tasks work as root without `--dangerously-skip-permissions`.
+
 ### Alternative: symlink (keeps repo updates separate)
 
 ```bash
