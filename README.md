@@ -51,6 +51,7 @@ Opens a full-screen menu where you can navigate with arrow keys and select actio
 /cron remove my-task
 /cron enable my-task
 /cron disable my-task
+/cron run my-task                 — Execute a task now (one-shot)
 /cron start                       — Start background daemon
 /cron stop                        — Stop daemon
 /cron status                      — Check daemon status
@@ -58,12 +59,13 @@ Opens a full-screen menu where you can navigate with arrow keys and select actio
 /cron test "*/15 * * * *"        — Test cron expression
 ```
 
-### Standalone CLI (outside OpenClaude)
+### Standalone CLI (outside OpenClude)
 
 ```bash
 python3 ~/.claude/skills/cron/scripts/cronctl.py list
 python3 ~/.claude/skills/cron/scripts/cronctl.py add my-task "0 9 * * 1-5" "review open PRs"
-python3 ~/.claude/skills/cron/scripts/cronctl.py start
+python3 ~/.claude/skills/cron/scripts/cronctl.py run my-task
+python3 ~/.claude/skills/cron/scripts/cronctl.py start  # note: daemon start uses cron-daemon.sh
 ```
 
 ## Architecture
@@ -77,7 +79,8 @@ python3 ~/.claude/skills/cron/scripts/cronctl.py start
     ├── cronctl.py                  # Task management CLI
     ├── cron-daemon.sh              # Background scheduler daemon
     ├── cron-helpers.sh             # Shared utilities (logging, PID, locking)
-    └── cron-parse.sh               # POSIX 5-field cron expression parser
+    ├── cron-parse.sh               # POSIX 5-field cron expression parser
+    └── cron_json_helper.py         # JSON operations for daemon (replaces awk)
 
 ~/.openclaude/cron/
 ├── cron-tasks.json                 # Persistent task config
@@ -88,7 +91,7 @@ python3 ~/.claude/skills/cron/scripts/cronctl.py start
 ## How It Works
 
 1. **Daemon** (`cron-daemon.sh`) runs in the background, checking every 60 seconds
-2. On each tick, it reads `cron-tasks.json` and evaluates cron expressions
+2. On each tick, it calls `cron_json_helper.py due-tasks` to find enabled tasks matching the current time
 3. Due tasks execute via `openclaude -p "<prompt>" --dangerously-skip-permissions`
 4. Results are logged to `~/.openclaude/cron/logs/<task-id>.log`
 5. Concurrency limit (default: 3) prevents resource exhaustion

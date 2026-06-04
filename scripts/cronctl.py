@@ -8,6 +8,7 @@ Usage:
     cronctl.py remove <id>                 Remove a task
     cronctl.py enable <id>                 Enable a task
     cronctl.py disable <id>                Disable a task
+    cronctl.py run <id>                    Run a task now (one-shot)
     cronctl.py log <id> [lines]            Show task logs
     cronctl.py test <cron-expr>            Test cron expression against current time
 """
@@ -16,11 +17,13 @@ import os
 import sys
 import subprocess
 import re
+import tempfile
 from datetime import datetime
 
 TASKS_FILE = os.path.expanduser("~/.openclaude/cron/cron-tasks.json")
 LOG_DIR = os.path.expanduser("~/.openclaude/cron/logs")
 
+# ── Helpers ────────────────────────────────────────────────────────────────────
 
 def ensure_file():
     os.makedirs(os.path.dirname(TASKS_FILE), exist_ok=True)
@@ -31,16 +34,47 @@ def ensure_file():
 
 def load_tasks():
     ensure_file()
-    with open(TASKS_FILE) as f:
-        return json.load(f)
+    try:
+        with open(TASKS_FILE) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"Error: corrupted tasks.json: {e}", file=sys.stderr)
+        # Backup corrupted file and start fresh
+        backup = TASKS_FILE + ".corrupted"
+        try:
+            os.replace(TASKS_FILE, backup)
+            print(f"Backed up corrupted file to {backup}", file=sys.stderr)
+        except OSError:
+            pass
+        ensure_file()
+        return {"tasks": []}
 
 
 def save_tasks(data):
-    tmp = TASKS_FILE + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(data, f, indent=2)
-    os.replace(tmp, TASKS_FILE)
+    os.makedirs(os.path.dirname(TASKS_FILE), exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(
+        dir=os.path.dirname(TASKS_FILE), suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp_path, TASKS_FILE)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
+
+def valid_task_id(task_id):
+    return bool(re.match(r'^[a-zA-Z0-9_-]{1,64}$', task_id))
+
+
+def get_script_dir():
+    return os.path.dirname(os.path.abspath(__file__))
+
+# ── Commands ───────────────────────────────────────────────────────────────────
 
 def cmd_list():
     data = load_tasks()
@@ -63,16 +97,20 @@ def cmd_add(args):
 
     task_id, schedule, prompt = args[0], args[1], " ".join(args[2:])
 
-    # Validate ID
-    if not re.match(r'^[a-zA-Z0-9_-]{1,64}$', task_id):
+    if not valid_task_id(task_id):
         print(f"Error: invalid task ID '{task_id}' (alphanumeric, hyphens, underscores, 1-64 chars)")
         sys.exit(1)
 
-    # Validate schedule has 5 fields
     fields = schedule.split()
     if len(fields) != 5:
         print(f"Error: cron expression must have 5 fields, got {len(fields)}")
         sys.exit(1)
+
+    # Validate each field contains only valid cron characters
+    for i, field in enumerate(fields):
+        if not re.match(r'^[\d\*\/\-\,]+$', field):
+            print(f"Error: invalid cron field '{field}' (field {i+1})")
+            sys.exit(1)
 
     data = load_tasks()
     if any(t["id"] == task_id for t in data["tasks"]):
@@ -135,13 +173,59 @@ def _set_enabled(task_id, enabled):
     sys.exit(1)
 
 
+def cmd_run(args):
+    """Run a task immediately (one-shot)."""
+    if not args:
+        print("Usage: cronctl.py run <id>")
+        sys.exit(1)
+
+    task_id = args[0]
+    data = load_tasks()
+    task = next((t for t in data["tasks"] if t["id"] == task_id), None)
+    if not task:
+        print(f"Error: task '{task_id}' not found")
+        sys.exit(1)
+
+    prompt = task["prompt"]
+    print(f"Running task '{task_id}'...")
+    result = subprocess.run(
+        ["openclaude", "-p", prompt,
+         "--dangerously-skip-permissions",
+         "--output-format", "text"],
+        capture_output=True, text=True, timeout=300
+    )
+    print(result.stdout, end="")
+    if result.stderr:
+        print(result.stderr, file=sys.stderr, end="")
+    print(f"Exit code: {result.returncode}")
+
+    # Update last_run
+    now = datetime.now().isoformat()
+    for t in data["tasks"]:
+        if t["id"] == task_id:
+            t["last_run"] = now
+            save_tasks(data)
+            break
+
+
 def cmd_log(args):
     if not args:
         print("Usage: cronctl.py log <id> [lines]")
         sys.exit(1)
 
     task_id = args[0]
-    lines = int(args[1]) if len(args) > 1 else 20
+    if not valid_task_id(task_id):
+        print(f"Error: invalid task ID '{task_id}'")
+        sys.exit(1)
+
+    try:
+        lines = int(args[1]) if len(args) > 1 else 20
+        if lines < 1:
+            raise ValueError
+    except (ValueError, IndexError):
+        print("Error: lines must be a positive integer")
+        sys.exit(1)
+
     logfile = os.path.join(LOG_DIR, f"{task_id}.log")
 
     if not os.path.exists(logfile):
@@ -168,9 +252,7 @@ def cmd_test(args):
     print(f"Expression: {expr}")
     print(f"Current time: {now.strftime('%Y-%m-%d %H:%M:%S')} (min={now.minute}, hour={now.hour}, dom={now.day}, month={now.month}, dow={now.weekday()})")
 
-    # Source the bash parser for testing
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    parse_script = os.path.join(script_dir, "cron-parse.sh")
+    parse_script = os.path.join(get_script_dir(), "cron-parse.sh")
     result = subprocess.run(
         ["bash", parse_script, expr],
         capture_output=True, text=True
@@ -195,6 +277,7 @@ def main():
         "remove": lambda: cmd_remove(args),
         "enable": lambda: cmd_enable(args),
         "disable": lambda: cmd_disable(args),
+        "run": lambda: cmd_run(args),
         "log": lambda: cmd_log(args),
         "test": lambda: cmd_test(args),
     }

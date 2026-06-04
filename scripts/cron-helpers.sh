@@ -9,6 +9,8 @@ CRON_TASKS_FILE="$CRON_DATA_DIR/cron-tasks.json"
 CRON_LOCK_FILE="$CRON_DATA_DIR/cron.lock"
 CRON_PID_FILE="$CRON_DATA_DIR/cron.pid"
 CRON_LOG_DIR="$CRON_DATA_DIR/logs"
+CRON_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CRON_JSON_HELPER="$CRON_SCRIPT_DIR/cron_json_helper.py"
 CRON_MAX_LOG_LINES="${CRON_MAX_LOG_LINES:-500}"
 
 # ── Initialization ─────────────────────────────────────────────────────────────
@@ -31,6 +33,11 @@ log_error() { _log "ERROR" "$*" >&2; }
 
 log_task() {
     local task_id="$1" msg="$2"
+    # Validate task_id to prevent path traversal
+    if ! valid_task_id "$task_id"; then
+        log_error "Invalid task_id for logging: '$task_id'"
+        return 1
+    fi
     local logfile="$CRON_LOG_DIR/${task_id}.log"
     printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$msg" >> "$logfile"
     _rotate_log "$logfile"
@@ -43,13 +50,14 @@ _rotate_log() {
     local lines
     lines=$(wc -l < "$logfile" 2>/dev/null || echo 0)
     if [ "$lines" -gt "$CRON_MAX_LOG_LINES" ]; then
-        local tmp="${logfile}.tmp"
+        local tmp
+        tmp=$(mktemp "${logfile}.XXXXXX")
         tail -n "$CRON_MAX_LOG_LINES" "$logfile" > "$tmp"
         mv "$tmp" "$logfile"
     fi
 }
 
-# ── JSON Helpers (awk-based, no jq dependency) ─────────────────────────────────
+# ── JSON Helpers ───────────────────────────────────────────────────────────────
 # Read a JSON file safely with fallback
 json_read() {
     local file="$1"
@@ -63,30 +71,44 @@ json_read() {
 # Atomic write: write to temp file then mv (atomic on POSIX)
 json_write() {
     local file="$1" content="$2"
-    local tmp="${file}.tmp.$$"
+    local tmp
+    tmp=$(mktemp "${file}.XXXXXX")
     echo "$content" > "$tmp"
     mv -f "$tmp" "$file"
 }
 
-# Lock file for concurrent access
-cron_lock() {
-    mkdir -p "$(dirname "$CRON_LOCK_FILE")"
-    # Use flock via shell redirection
-    exec 9>"$CRON_LOCK_FILE"
-    flock -x 9
-    # Return the fd number so caller can unlock
-    echo 9
+# ── Task Count (delegates to Python for accuracy) ──────────────────────────────
+task_count() {
+    if [ -f "$CRON_JSON_HELPER" ]; then
+        python3 "$CRON_JSON_HELPER" task-count
+    else
+        echo "0"
+    fi
 }
 
+# ── Locking (file-based, no eval) ──────────────────────────────────────────────
+# Open exclusive lock on fd 9. Returns immediately if lock is held.
+cron_lock() {
+    mkdir -p "$(dirname "$CRON_LOCK_FILE")"
+    exec 9>"$CRON_LOCK_FILE"
+    flock -x 9
+}
+
+# Release lock on fd 9
 cron_unlock() {
-    local fd="${1:-9}"
-    eval "exec ${fd}>&-"
+    exec 9>&-
 }
 
 # ── Task ID Slugification ─────────────────────────────────────────────────────
-# Convert any string to a safe slug: lowercase, alphanumeric + hyphens only
 slugify() {
     echo "$1" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g; s/--*/-/g; s/^-//; s/-$//'
+}
+
+# ── Validate Task ID ───────────────────────────────────────────────────────────
+# Only allow alphanumeric + hyphens + underscores, 1-64 chars
+valid_task_id() {
+    local id="$1"
+    echo "$id" | grep -qE '^[a-zA-Z0-9_-]{1,64}$'
 }
 
 # ── PID Management ─────────────────────────────────────────────────────────────
@@ -115,27 +137,11 @@ pid_cleanup() {
 ensure_single_daemon() {
     local existing_pid
     existing_pid=$(pid_read)
-    if [ -n "$existing_pid" ] && pid_is_running "$existing_pid" ]; then
+    if [ -n "$existing_pid" ] && pid_is_running "$existing_pid"; then
         log_error "Daemon already running (PID $existing_pid)"
         log_error "Use 'cron stop' first, or remove $CRON_PID_FILE if stale"
         exit 1
     fi
     # Stale PID file
     pid_cleanup
-}
-
-# ── Task Count ─────────────────────────────────────────────────────────────────
-# Returns the number of tasks in tasks.json
-task_count() {
-    local content
-    content=$(json_read "$CRON_TASKS_FILE")
-    # Count occurrences of "id": in the tasks array
-    echo "$content" | grep -o '"id"' | wc -l | tr -d ' '
-}
-
-# ── Validate Task ID ───────────────────────────────────────────────────────────
-# Only allow alphanumeric + hyphens + underscores, 1-64 chars
-valid_task_id() {
-    local id="$1"
-    echo "$id" | grep -qE '^[a-zA-Z0-9_-]{1,64}$'
 }

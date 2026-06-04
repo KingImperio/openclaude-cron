@@ -23,13 +23,19 @@ CRON_MAX_PAR="${CRON_MAX_CONCURRENT:-3}"
 CRON_RUNNING_DIR="$CRON_DATA_DIR/running"
 OPENCLAUDE_BIN="${OPENCLAUDE_BIN:-openclaude}"
 
+# Track child PIDs for clean shutdown
+declare -a CHILD_PIDS=()
+
 # ── Trap Handlers ──────────────────────────────────────────────────────────────
 _cleanup() {
     log_info "Daemon shutting down (PID $$)"
-    pid_cleanup
-    # Kill any remaining child processes
-    kill 0 2>/dev/null || true
+    # Kill only tracked children, not the entire process group
+    for cpid in "${CHILD_PIDS[@]}"; do
+        kill -TERM "$cpid" 2>/dev/null || true
+    done
     wait 2>/dev/null || true
+    pid_cleanup
+    rm -rf "$CRON_RUNNING_DIR"
 }
 
 _handle_sighup() {
@@ -41,10 +47,14 @@ _handle_sigterm() { _cleanup; exit 0; }
 _handle_sigint()  { _cleanup; exit 0; }
 
 # ── Reap Zombies ───────────────────────────────────────────────────────────────
-_reaper() {
-    while true; do
-        wait -n 2>/dev/null || break
+_reap_finished() {
+    local new_pids=()
+    for cpid in "${CHILD_PIDS[@]}"; do
+        if kill -0 "$cpid" 2>/dev/null; then
+            new_pids+=("$cpid")
+        fi
     done
+    CHILD_PIDS=("${new_pids[@]+"${new_pids[@]}"}")
 }
 
 # ── Run a Single Task ─────────────────────────────────────────────────────────
@@ -52,6 +62,12 @@ _run_task() {
     local task_id="$1" prompt="$2"
     local logfile="$CRON_LOG_DIR/${task_id}.log"
     local marker="$CRON_RUNNING_DIR/${task_id}.pid"
+
+    # Validate task_id
+    if ! valid_task_id "$task_id"; then
+        log_error "Invalid task_id: '$task_id' — skipping"
+        return 1
+    fi
 
     # Concurrency check: skip if already running
     if [ -f "$marker" ]; then
@@ -66,8 +82,10 @@ _run_task() {
     fi
 
     # Concurrency limit check
-    local running_count
-    running_count=$(ls "$CRON_RUNNING_DIR"/*.pid 2>/dev/null | wc -l || echo 0)
+    local running_count=0
+    if [ -d "$CRON_RUNNING_DIR" ]; then
+        running_count=$(find "$CRON_RUNNING_DIR" -name "*.pid" -type f 2>/dev/null | wc -l || echo 0)
+    fi
     if [ "$running_count" -ge "$CRON_MAX_PAR" ]; then
         log_warn "Concurrency limit ($CRON_MAX_PAR) reached — skipping task '$task_id'"
         return 0
@@ -76,76 +94,52 @@ _run_task() {
     log_info "Running task '$task_id'"
     log_task "$task_id" "--- Run started ---"
 
-    # Write PID marker
-    mkdir -p "$CRON_RUNNING_DIR"
-    echo "$$" > "$marker"
+    # Execute the task in a subshell, capture its PID
+    (
+        # Write PID marker from within the subshell (actual task PID)
+        mkdir -p "$CRON_RUNNING_DIR"
+        echo "$$" > "$marker"
 
-    # Execute the task with timeout
-    local exit_code=0
-    timeout "$CRON_TIMEOUT" \
-        "$OPENCLAUDE_BIN" -p "$prompt" \
-        --dangerously-skip-permissions \
-        --output-format text \
-        2>>"$logfile" \
-        >> "$logfile" || exit_code=$?
+        local exit_code=0
+        timeout "$CRON_TIMEOUT" \
+            "$OPENCLAUDE_BIN" -p "$prompt" \
+            --dangerously-skip-permissions \
+            --output-format text \
+            2>>"$logfile" \
+            >> "$logfile" || exit_code=$?
 
-    # Clean up marker
-    rm -f "$marker"
+        # Clean up marker
+        rm -f "$marker"
 
-    if [ "$exit_code" -eq 0 ]; then
-        log_task "$task_id" "--- Run succeeded ---"
-        log_info "Task '$task_id' completed successfully"
-    elif [ "$exit_code" -eq 124 ]; then
-        log_task "$task_id" "--- Run timed out (${CRON_TIMEOUT}s) ---"
-        log_warn "Task '$task_id' timed out after ${CRON_TIMEOUT}s"
-    else
-        log_task "$task_id" "--- Run failed (exit code: $exit_code) ---"
-        log_warn "Task '$task_id' failed with exit code $exit_code"
-    fi
+        if [ "$exit_code" -eq 0 ]; then
+            log_task "$task_id" "--- Run succeeded ---"
+            log_info "Task '$task_id' completed successfully"
+        elif [ "$exit_code" -eq 124 ]; then
+            log_task "$task_id" "--- Run timed out (${CRON_TIMEOUT}s) ---"
+            log_warn "Task '$task_id' timed out after ${CRON_TIMEOUT}s"
+        else
+            log_task "$task_id" "--- Run failed (exit code: $exit_code) ---"
+            log_warn "Task '$task_id' failed with exit code $exit_code"
+        fi
+
+        # Update last_run timestamp
+        python3 "$CRON_JSON_HELPER" update-last-run "$task_id" 2>/dev/null || true
+    ) &
+    local task_pid=$!
+    CHILD_PIDS+=("$task_pid")
 }
 
 # ── Check and Run Due Tasks ────────────────────────────────────────────────────
 _check_tasks() {
-    local content now_min now_hour now_dom now_month now_dow
-    content=$(json_read "$CRON_TASKS_FILE")
-
+    local now_min now_hour now_dom now_month now_dow
     now_min=$(date '+%-M')
     now_hour=$(date '+%-H')
     now_dom=$(date '+%-d')
     now_month=$(date '+%-m')
     now_dow=$(date '+%-w')
 
-    # Parse tasks — extract id, schedule, enabled for each task
-    # Using awk to parse the JSON structure
-    echo "$content" | awk -v min="$now_min" -v hour="$now_hour" -v dom="$now_dom" -v month="$now_month" -v dow="$now_dow" '
-    BEGIN { in_tasks = 0; task_count = 0; }
-    /"tasks"/ { in_tasks = 1; next }
-    in_tasks && /"id"/ {
-        gsub(/.*"id"[[:space:]]*:[[:space:]]*"/, ""); gsub(/".*/, "");
-        current_id = $0;
-        next
-    }
-    in_tasks && /"schedule"/ {
-        gsub(/.*"schedule"[[:space:]]*:[[:space:]]*"/, ""); gsub(/".*/, "");
-        current_schedule = $0;
-        next
-    }
-    in_tasks && /"prompt"/ {
-        gsub(/.*"prompt"[[:space:]]*:[[:space:]]*"/, ""); gsub(/".*/, "");
-        current_prompt = $0;
-        next
-    }
-    in_tasks && /"enabled"/ {
-        gsub(/.*"enabled"[[:space:]]*:[[:space:]]*/, ""); gsub(/,.*/, "");
-        gsub(/[[:space:]]/, "");
-        current_enabled = $0;
-        if (current_id != "" && current_enabled == "true") {
-            print current_id "|" current_schedule "|" current_prompt;
-        }
-        current_id = ""; current_schedule = ""; current_prompt = "";
-        next
-    }
-    '
+    # Use Python helper for reliable JSON parsing (replaces fragile awk)
+    python3 "$CRON_JSON_HELPER" due-tasks "$now_min" "$now_hour" "$now_dom" "$now_month" "$now_dow" 2>/dev/null
 }
 
 # ── Main Loop ──────────────────────────────────────────────────────────────────
@@ -154,29 +148,15 @@ _daemon_loop() {
     pid_write
 
     while true; do
-        # Check for due tasks
-        local due_line
-        while IFS= read -r due_line; do
-            [ -z "$due_line" ] && continue
-            local task_id schedule prompt
-            task_id=$(echo "$due_line" | cut -d'|' -f1)
-            schedule=$(echo "$due_line" | cut -d'|' -f2)
-            prompt=$(echo "$due_line" | cut -d'|' -f3-)
+        # Reap finished children
+        _reap_finished
 
-            # Check cron match
-            if cron_matches "$schedule" \
-                "$(date '+%-M')" \
-                "$(date '+%-H')" \
-                "$(date '+%-d')" \
-                "$(date '+%-m')" \
-                "$(date '+%-w')"; then
-                # Run task in background subshell
-                ( _run_task "$task_id" "$prompt" ) &
-            fi
+        # Check for due tasks (tab-delimited: id\tschedule\tprompt)
+        while IFS=$'\t' read -r task_id schedule prompt; do
+            [ -z "$task_id" ] && continue
+            # Run task in background
+            _run_task "$task_id" "$prompt"
         done < <(_check_tasks)
-
-        # Reap any finished children
-        _reaper 2>/dev/null || true
 
         sleep "$CRON_TICK"
     done
@@ -190,7 +170,6 @@ cmd_start() {
     log_info "Starting daemon..."
     # Daemonize: fork, setsid, fork again (classic double-fork)
     (
-        # First fork
         if [ "$(id -u)" -ne 0 ]; then
             setsid bash "$0" _foreground &
         else
@@ -198,7 +177,7 @@ cmd_start() {
         fi
         disown
     )
-    sleep 1
+    sleep 2
     if [ -f "$CRON_PID_FILE" ]; then
         log_info "Daemon started (PID $(pid_read))"
     else
@@ -214,7 +193,7 @@ cmd_stop() {
         log_warn "No daemon PID found"
         return 0
     fi
-    if pid_is_running "$pid" ]; then
+    if pid_is_running "$pid"; then
         log_info "Stopping daemon (PID $pid)..."
         kill -TERM "$pid" 2>/dev/null || true
         # Wait up to 5s for graceful shutdown
@@ -223,7 +202,7 @@ cmd_stop() {
             sleep 1
             waited=$((waited + 1))
         done
-        if pid_is_running "$pid" ]; then
+        if pid_is_running "$pid"; then
             log_warn "Force killing daemon (PID $pid)"
             kill -KILL "$pid" 2>/dev/null || true
         fi
@@ -239,7 +218,7 @@ cmd_stop() {
 cmd_status() {
     local pid
     pid=$(pid_read)
-    if [ -n "$pid" ] && pid_is_running "$pid" ]; then
+    if [ -n "$pid" ] && pid_is_running "$pid"; then
         echo "Daemon: running (PID $pid)"
     else
         echo "Daemon: not running"
@@ -256,7 +235,7 @@ cmd_status() {
 
     if [ -d "$CRON_LOG_DIR" ]; then
         local log_count
-        log_count=$(ls "$CRON_LOG_DIR"/*.log 2>/dev/null | wc -l || echo 0)
+        log_count=$(find "$CRON_LOG_DIR" -name "*.log" -type f 2>/dev/null | wc -l || echo 0)
         echo "Logs: $log_count task log(s)"
     fi
 }
