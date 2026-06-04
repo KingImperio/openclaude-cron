@@ -28,6 +28,7 @@ PID_FILE = os.path.join(DATA_DIR, "cron.pid")
 HEARTBEAT_FILE = os.path.join(DATA_DIR, "heartbeat")
 HEARTBEAT_STALE_SECONDS = 180  # 3x tick = stale
 LOG_DIR = os.path.join(DATA_DIR, "logs")
+MAX_LOG_LINES = 500
 JSON_HELPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cron_json_helper.py")
 OPENCLAUDE_BIN = os.environ.get("OPENCLAUDE_BIN", "openclaude")
 
@@ -127,11 +128,27 @@ def run_task(task_id, prompt):
         return
 
     logfile = os.path.join(LOG_DIR, f"{task_id}.log")
-    os.makedirs(LOG_DIR, exist_ok=True)
+    os.makedirs(LOG_DIR, mode=0o700, exist_ok=True)
+
+    # Rotate log if too large (check before open)
+    try:
+        if os.path.exists(logfile) and os.path.getsize(logfile) > 0:
+            with open(logfile) as lf:
+                line_count = sum(1 for _ in lf)
+            if line_count > MAX_LOG_LINES:
+                import shutil
+                tmp = logfile + ".rot"
+                with open(logfile) as lf:
+                    lines = lf.readlines()
+                with open(tmp, "w") as lf:
+                    lf.writelines(lines[-MAX_LOG_LINES:])
+                os.replace(tmp, logfile)
+    except OSError:
+        pass
 
     # Launch task in subprocess (non-blocking)
     # No --dangerously-skip-permissions: relies on settings.json Bash(*) config
-    log_fh = open(logfile, "a")
+    log_fh = open(logfile, "a", 0o600)
     proc = subprocess.Popen(
         [OPENCLAUDE_BIN, "-p", prompt,
          "--output-format", "text"],
@@ -169,12 +186,13 @@ def reap_finished():
 
 # ── Heartbeat ──────────────────────────────────────────────────────────────────
 def write_heartbeat():
-    """Write current timestamp to heartbeat file (atomic)."""
-    os.makedirs(DATA_DIR, exist_ok=True)
+    """Write current timestamp to heartbeat file (atomic, restrictive perms)."""
+    os.makedirs(DATA_DIR, mode=0o700, exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(
         dir=DATA_DIR, suffix=".tmp"
     )
     try:
+        os.fchmod(fd, 0o600)
         with os.fdopen(fd, "w") as f:
             f.write(datetime.now().isoformat())
         os.replace(tmp_path, HEARTBEAT_FILE)
@@ -202,12 +220,13 @@ def is_heartbeat_stale():
 def daemon_loop():
     global shutdown_requested
 
-    # Write PID atomically
-    os.makedirs(DATA_DIR, exist_ok=True)
+    # Write PID atomically with restrictive permissions
+    os.makedirs(DATA_DIR, mode=0o700, exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(
         dir=DATA_DIR, suffix=".tmp"
     )
     try:
+        os.fchmod(fd, 0o600)
         with os.fdopen(fd, "w") as f:
             f.write(str(os.getpid()))
         os.replace(tmp_path, PID_FILE)
@@ -264,6 +283,8 @@ def daemon_loop():
                     parts = line.split("\t", 2)
                     if len(parts) == 3:
                         task_id, schedule, prompt = parts
+                        # Decode escaped newlines/tabs from JSON helper
+                        prompt = prompt.replace("\\n", "\n").replace("\\t", "\t").replace("\\\\", "\\")
                         run_task(task_id, prompt)
             except subprocess.TimeoutExpired:
                 print("WARN: JSON helper timed out", file=sys.stderr)

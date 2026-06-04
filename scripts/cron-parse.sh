@@ -17,6 +17,7 @@ set -euo pipefail
 _cron_expand_field() {
     local field="$1" lo="$2" hi="$3"
     local result="" part field_val
+    local _CRON_MAX_RANGE=1000
 
     IFS=',' read -ra parts <<< "$field"
     for part in "${parts[@]}"; do
@@ -52,6 +53,11 @@ _cron_expand_field() {
             # Range: e.g. 1-5
             local range_lo="${range_part%-*}"
             local range_hi="${range_part#*-}"
+            # Prevent memory DoS from absurd ranges
+            if [ $((range_hi - range_lo)) -gt "$_CRON_MAX_RANGE" ]; then
+                echo "ERROR: cron range too large: ${range_part} (max ${_CRON_MAX_RANGE})" >&2
+                return 1
+            fi
             if [ -n "$step" ]; then
                 local i="$range_lo"
                 while [ "$i" -le "$range_hi" ]; do

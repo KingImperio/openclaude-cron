@@ -158,11 +158,11 @@ def cmd_due_tasks(args):
             print(f"WARN: skipping task '{task.get('id', '?')}' — bad cron expression: {e}", file=sys.stderr)
             continue
         if is_due:
-            # Output: id|schedule|prompt (prompt may contain pipes — use \n as delimiter instead)
             task_id = task["id"]
             schedule = task["schedule"]
-            prompt = task["prompt"]
-            # Use tab delimiter since prompt can contain anything except tabs
+            # Encode newlines in prompt so they don't break the output format
+            prompt = task["prompt"].replace("\\", "\\\\").replace("\n", "\\n").replace("\t", "\\t")
+            # Use tab delimiter since prompt has escaped tabs/newlines
             print(f"{task_id}\t{schedule}\t{prompt}")
 
 
