@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-cron-interactive.py — Arrow-key interactive menu for OpenClade cron.
+cron-interactive.py — Arrow-key interactive menu for OpenClaude cron.
 Run without arguments for full interactive mode.
 Run with arguments to dispatch directly (e.g., cron-interactive.py list).
 """
@@ -216,7 +216,7 @@ def interactive_menu(stdscr):
     """Main interactive flow."""
     while True:
         # Main menu
-        menu = CursesMenu(stdscr, "OpenClade Cron", MENU_ITEMS,
+        menu = CursesMenu(stdscr, "OpenClaude Cron", MENU_ITEMS,
                           subtitle="Select an action")
         choice = menu.run()
 

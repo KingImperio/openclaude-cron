@@ -1,8 +1,8 @@
-# OpenClade Cron
+# OpenClaude Cron
 
-A persistent, cross-session cron scheduler for [OpenClude](https://github.com/Gitlawb/openclaude) (Claude Code). Runs background tasks by shelling out to `openclaude -p` on standard cron schedules.
+A persistent, cross-session cron scheduler for [OpenClaude](https://github.com/Gitlawb/openclaude) (Claude Code). Runs background tasks by shelling out to `openclaude -p` on standard cron schedules.
 
-Unlike the built-in `CronCreate`/`/loop` tools (which are session-scoped and expire after 7 days), OpenClade Cron persists across session restarts and runs as an independent background daemon.
+Unlike the built-in `CronCreate`/`/loop` tools (which are session-scoped and expire after 7 days), OpenClaude Cron persists across session restarts and runs as an independent background daemon.
 
 ## Features
 
@@ -16,17 +16,22 @@ Unlike the built-in `CronCreate`/`/loop` tools (which are session-scoped and exp
 
 ## Install
 
-```bash
-# Clone the repo
-git clone https://github.com/KingImperio/openclade-cron.git ~/.claude/skills/cron
-```
-
-Or symlink it:
+One-liner — copies the skill directly into your OpenClaude skills directory:
 
 ```bash
-git clone https://github.com/KingImperio/openclade-cron.git /path/to/openclade-cron
-ln -s /path/to/openclade-cron ~/.claude/skills/cron
+git clone https://github.com/KingImperio/openclaude-cron.git ~/.claude/skills/cron
 ```
+
+That's it. `/cron` is now available in your next OpenClaude session.
+
+### Alternative: symlink (keeps repo updates separate)
+
+```bash
+git clone https://github.com/KingImperio/openclaude-cron.git ~/openclaude-cron
+ln -s ~/openclaude-cron ~/.claude/skills/cron
+```
+
+Then update anytime with `cd ~/.claude/skills/cron && git pull`.
 
 ## Usage
 
@@ -53,7 +58,7 @@ Opens a full-screen menu where you can navigate with arrow keys and select actio
 /cron test "*/15 * * * *"        — Test cron expression
 ```
 
-### Standalone CLI (outside OpenClude)
+### Standalone CLI (outside OpenClaude)
 
 ```bash
 python3 ~/.claude/skills/cron/scripts/cronctl.py list
@@ -65,6 +70,7 @@ python3 ~/.claude/skills/cron/scripts/cronctl.py start
 
 ```
 ~/.claude/skills/cron/
+├── README.md
 ├── SKILL.md                        # Slash command definition
 └── scripts/
     ├── cron-interactive.py         # Arrow-key curses menu

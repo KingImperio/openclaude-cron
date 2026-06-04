@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-cronctl.py — Task management CLI for OpenClade cron.
+cronctl.py — Task management CLI for OpenClaude cron.
 
 Usage:
     cronctl.py list                        List all tasks

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# cron-helpers.sh — Shared utilities for the OpenClade cron skill
+# cron-helpers.sh — Shared utilities for the OpenClaude cron skill
 # Provides: atomic JSON writes, file locking, logging, slugification, log rotation
 set -euo pipefail
 

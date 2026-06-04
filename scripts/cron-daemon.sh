@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# cron-daemon.sh — Background scheduler for OpenClade cron tasks
+# cron-daemon.sh — Background scheduler for OpenClaude cron tasks
 # Runs tasks by executing `openclaude -p "<prompt>"` on configured schedules.
 #
 # Usage:

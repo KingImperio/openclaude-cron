@@ -5,7 +5,7 @@ argument-hint: <command> [args...]
 allowed-tools: [Bash, Read, Write, Glob, Grep]
 ---
 
-# OpenClade Cron
+# OpenClaude Cron
 
 Manage persistent, cross-session background tasks using standard cron schedules.
 Tasks execute by shelling out to `openclaude -p` in the background.
