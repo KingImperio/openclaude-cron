@@ -15,6 +15,7 @@ import sys
 import tempfile
 
 TASKS_FILE = os.path.expanduser("~/.openclaude/cron/cron-tasks.json")
+TASKS_LOCK = TASKS_FILE + ".lock"
 
 # ── Cron field expansion (mirrors cron-parse.sh) ──────────────────────────────
 
@@ -105,12 +106,13 @@ def load_tasks():
     if not os.path.exists(TASKS_FILE):
         return []
     try:
-        with open(TASKS_FILE) as f:
-            fcntl.flock(f, fcntl.LOCK_SH)
+        with open(TASKS_LOCK, "w") as lockf:
+            fcntl.flock(lockf, fcntl.LOCK_SH)
             try:
-                data = json.load(f)
+                with open(TASKS_FILE) as f:
+                    data = json.load(f)
             finally:
-                fcntl.flock(f, fcntl.LOCK_UN)
+                fcntl.flock(lockf, fcntl.LOCK_UN)
         return data.get("tasks", [])
     except (json.JSONDecodeError, OSError):
         return []
@@ -119,25 +121,26 @@ def load_tasks():
 def save_tasks(tasks):
     """Save tasks atomically with exclusive lock."""
     os.makedirs(os.path.dirname(TASKS_FILE), exist_ok=True)
-    tmp_fd, tmp_path = tempfile.mkstemp(
-        dir=os.path.dirname(TASKS_FILE), suffix=".tmp"
-    )
-    try:
-        with os.fdopen(tmp_fd, "w") as f:
-            fcntl.flock(f, fcntl.LOCK_EX)
-            try:
-                json.dump({"tasks": tasks}, f, indent=2)
-                f.flush()
-                os.fsync(f.fileno())
-            finally:
-                fcntl.flock(f, fcntl.LOCK_UN)
-        os.replace(tmp_path, TASKS_FILE)
-    except Exception:
+    with open(TASKS_LOCK, "w") as lockf:
+        fcntl.flock(lockf, fcntl.LOCK_EX)
         try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
+            tmp_fd, tmp_path = tempfile.mkstemp(
+                dir=os.path.dirname(TASKS_FILE), suffix=".tmp"
+            )
+            try:
+                with os.fdopen(tmp_fd, "w") as f:
+                    json.dump({"tasks": tasks}, f, indent=2)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp_path, TASKS_FILE)
+            except Exception:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
+        finally:
+            fcntl.flock(lockf, fcntl.LOCK_UN)
 
 
 def cmd_due_tasks(args):

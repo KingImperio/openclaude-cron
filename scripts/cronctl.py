@@ -22,6 +22,7 @@ import fcntl
 from datetime import datetime
 
 TASKS_FILE = os.path.expanduser("~/.openclaude/cron/cron-tasks.json")
+TASKS_LOCK = TASKS_FILE + ".lock"
 LOG_DIR = os.path.expanduser("~/.openclaude/cron/logs")
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -36,15 +37,15 @@ def ensure_file():
 def load_tasks():
     ensure_file()
     try:
-        with open(TASKS_FILE) as f:
-            fcntl.flock(f, fcntl.LOCK_SH)
+        with open(TASKS_LOCK, "w") as lockf:
+            fcntl.flock(lockf, fcntl.LOCK_SH)
             try:
-                return json.load(f)
+                with open(TASKS_FILE) as f:
+                    return json.load(f)
             finally:
-                fcntl.flock(f, fcntl.LOCK_UN)
+                fcntl.flock(lockf, fcntl.LOCK_UN)
     except (json.JSONDecodeError, OSError) as e:
         print(f"Error: corrupted tasks.json: {e}", file=sys.stderr)
-        # Backup corrupted file and start fresh
         backup = TASKS_FILE + ".corrupted"
         try:
             os.replace(TASKS_FILE, backup)
@@ -53,6 +54,57 @@ def load_tasks():
             pass
         ensure_file()
         return {"tasks": []}
+
+
+def modify_tasks(fn):
+    """Atomically load, modify, and save tasks under exclusive lock.
+    fn receives the tasks list and should modify it in place.
+    Returns whatever fn returns."""
+    ensure_file()
+    os.makedirs(os.path.dirname(TASKS_LOCK), exist_ok=True)
+    lockf = open(TASKS_LOCK, "w")
+    try:
+        fcntl.flock(lockf, fcntl.LOCK_EX)
+        try:
+            # Read
+            with open(TASKS_FILE) as f:
+                data = json.load(f)
+            # Modify
+            result = fn(data.get("tasks", []))
+            # Write atomically
+            fd, tmp_path = tempfile.mkstemp(
+                dir=os.path.dirname(TASKS_FILE), suffix=".tmp"
+            )
+            try:
+                with os.fdopen(fd, "w") as tf:
+                    json.dump({"tasks": data["tasks"]}, tf, indent=2)
+                    tf.flush()
+                    os.fsync(tf.fileno())
+                os.replace(tmp_path, TASKS_FILE)
+            except Exception:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
+            return result
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"Error: corrupted tasks.json: {e}", file=sys.stderr)
+            backup = TASKS_FILE + ".corrupted"
+            try:
+                os.replace(TASKS_FILE, backup)
+                print(f"Backed up corrupted file to {backup}", file=sys.stderr)
+            except OSError:
+                pass
+            ensure_file()
+            data = {"tasks": []}
+            result = fn(data["tasks"])
+            with open(TASKS_FILE, "w") as f:
+                json.dump(data, f)
+            return result
+    finally:
+        fcntl.flock(lockf, fcntl.LOCK_UN)
+        lockf.close()
 
 
 def save_tasks(data):
@@ -138,7 +190,6 @@ def cmd_add(args):
         if not re.match(r'^[\d\*\/\-\,]+$', field):
             print(f"Error: invalid cron field '{field}' (field {i+1}) — only digits, *, /, -, , allowed")
             sys.exit(1)
-        # Check for structural issues
         if field.startswith('-') or field.endswith('-'):
             print(f"Error: invalid cron field '{field}' (field {i+1}) — range must have both endpoints")
             sys.exit(1)
@@ -148,7 +199,6 @@ def cmd_add(args):
         if ',,' in field:
             print(f"Error: invalid cron field '{field}' (field {i+1}) — empty list segment")
             sys.exit(1)
-        # Validate range endpoints and step are numeric
         for part in field.split('/'):
             for segment in part.split(','):
                 if '-' in segment:
@@ -161,7 +211,6 @@ def cmd_add(args):
             if not step_part.isdigit() or int(step_part) < 1:
                 print(f"Error: invalid step '{step_part}' in field {i+1} — must be positive integer")
                 sys.exit(1)
-        # Check range size to prevent memory DoS
         base = field.split('/')[0] if '/' in field else field
         for segment in base.split(','):
             if '-' in segment:
@@ -174,28 +223,26 @@ def cmd_add(args):
         print(f"Error: prompt too long ({len(prompt)} chars, max {MAX_PROMPT_LENGTH})")
         sys.exit(1)
 
-    # Sanitize leading -- to prevent CLI flag injection
     prompt = prompt.lstrip()
     if prompt.startswith("--"):
         prompt = "- " + prompt
 
-    data = load_tasks()
-    if any(t["id"] == task_id for t in data["tasks"]):
-        print(f"Error: task '{task_id}' already exists")
-        sys.exit(1)
+    def _add(tasks):
+        if any(t["id"] == task_id for t in tasks):
+            print(f"Error: task '{task_id}' already exists")
+            sys.exit(1)
+        if len(tasks) >= MAX_TASKS:
+            print(f"Error: task limit reached ({MAX_TASKS}). Remove a task first.")
+            sys.exit(1)
+        tasks.append({
+            "id": task_id,
+            "schedule": schedule,
+            "prompt": prompt,
+            "enabled": True,
+            "last_run": None,
+        })
 
-    if len(data["tasks"]) >= MAX_TASKS:
-        print(f"Error: task limit reached ({MAX_TASKS}). Remove a task first.")
-        sys.exit(1)
-
-    data["tasks"].append({
-        "id": task_id,
-        "schedule": schedule,
-        "prompt": prompt,
-        "enabled": True,
-        "last_run": None,
-    })
-    save_tasks(data)
+    modify_tasks(_add)
     print(f"Added task '{task_id}' with schedule '{schedule}'")
 
 
@@ -205,15 +252,17 @@ def cmd_remove(args):
         sys.exit(1)
 
     task_id = args[0]
-    data = load_tasks()
-    original_len = len(data["tasks"])
-    data["tasks"] = [t for t in data["tasks"] if t["id"] != task_id]
+    found = [False]
 
-    if len(data["tasks"]) == original_len:
+    def _remove(tasks):
+        orig_len = len(tasks)
+        tasks[:] = [t for t in tasks if t["id"] != task_id]
+        found[0] = len(tasks) < orig_len
+
+    modify_tasks(_remove)
+    if not found[0]:
         print(f"Error: task '{task_id}' not found")
         sys.exit(1)
-
-    save_tasks(data)
     print(f"Removed task '{task_id}'")
 
 
@@ -232,16 +281,21 @@ def cmd_disable(args):
 
 
 def _set_enabled(task_id, enabled):
-    data = load_tasks()
-    for t in data["tasks"]:
-        if t["id"] == task_id:
-            t["enabled"] = enabled
-            save_tasks(data)
-            state = "enabled" if enabled else "disabled"
-            print(f"Task '{task_id}' {state}")
-            return
-    print(f"Error: task '{task_id}' not found")
-    sys.exit(1)
+    found = [False]
+
+    def _toggle(tasks):
+        for t in tasks:
+            if t["id"] == task_id:
+                t["enabled"] = enabled
+                found[0] = True
+                return
+
+    modify_tasks(_toggle)
+    if not found[0]:
+        print(f"Error: task '{task_id}' not found")
+        sys.exit(1)
+    state = "enabled" if enabled else "disabled"
+    print(f"Task '{task_id}' {state}")
 
 
 def cmd_run(args):
