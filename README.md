@@ -94,28 +94,34 @@ You don't need to know cron syntax. These all work:
 ```
 ~/.claude/skills/cron/
 ├── README.md
+├── LICENSE
+├── .gitignore
 ├── SKILL.md                        # Slash command definition
 └── scripts/
+    ├── cron_daemon.py              # Persistent Python daemon (main scheduler)
     ├── cron-interactive.py         # Arrow-key curses menu
     ├── cronctl.py                  # Task management CLI
-    ├── cron-daemon.sh              # Background scheduler daemon
     ├── cron-helpers.sh             # Shared utilities (logging, PID, locking)
     ├── cron-parse.sh               # POSIX 5-field cron expression parser
-    └── cron_json_helper.py         # JSON operations for daemon (replaces awk)
+    └── cron_json_helper.py         # JSON operations + cron matching for daemon
 
 ~/.openclaude/cron/
 ├── cron-tasks.json                 # Persistent task config
 ├── cron.pid                        # Daemon PID file
-└── logs/                           # Per-task execution logs
+├── heartbeat                       # Last tick timestamp (health check)
+├── logs/                           # Per-task execution logs
+└── running/                        # PID markers for running tasks
 ```
 
 ## How It Works
 
-1. **Daemon** (`cron-daemon.sh`) runs in the background, checking every 60 seconds
-2. On each tick, it calls `cron_json_helper.py due-tasks` to find enabled tasks matching the current time
-3. Due tasks execute via `openclaude -p "<prompt>" --dangerously-skip-permissions`
+1. **Daemon** (`cron_daemon.py`) runs as a persistent Python process — no cold-start per tick
+2. Every 60 seconds, it calls `cron_json_helper.py due-tasks` to find enabled tasks matching the current time
+3. Due tasks execute via `openclaude -p "<prompt>" --dangerously-skip-permissions` in separate process groups
 4. Results are logged to `~/.openclaude/cron/logs/<task-id>.log`
 5. Concurrency limit (default: 3) prevents resource exhaustion
+6. **Catch-up**: after sleep/hibernate, missed ticks are detected and executed
+7. **Heartbeat**: a timestamp file is written every tick for health monitoring
 
 ## Configuration
 
