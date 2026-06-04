@@ -82,12 +82,22 @@ def cmd_list():
     if not tasks:
         print("No scheduled tasks.")
         return
-    print(f"{'ID':<20} {'SCHEDULE':<20} {'ENABLED':<10} {'LAST RUN'}")
-    print("-" * 75)
+
+    # Dynamic column widths
+    id_w = max(4, max(len(t["id"]) for t in tasks) + 2)
+    sched_w = max(8, max(len(t.get("schedule", "")) for t in tasks) + 2)
+    enabled_w = 10
+    header = f"{'ID':<{id_w}} {'SCHEDULE':<{sched_w}} {'ENABLED':<{enabled_w}} {'LAST RUN'}"
+    print(header)
+    print("-" * len(header))
     for t in tasks:
         enabled = t.get("enabled", True)
         last_run = t.get("last_run") or "never"
-        print(f"{t['id']:<20} {t['schedule']:<20} {str(enabled):<10} {last_run}")
+        print(f"{t['id']:<{id_w}} {t.get('schedule',''):<{sched_w}} {str(enabled):<{enabled_w}} {last_run}")
+
+
+MAX_PROMPT_LENGTH = 10240  # 10KB
+MAX_TASKS = 100
 
 
 def cmd_add(args):
@@ -112,9 +122,22 @@ def cmd_add(args):
             print(f"Error: invalid cron field '{field}' (field {i+1})")
             sys.exit(1)
 
+    if len(prompt) > MAX_PROMPT_LENGTH:
+        print(f"Error: prompt too long ({len(prompt)} chars, max {MAX_PROMPT_LENGTH})")
+        sys.exit(1)
+
+    # Sanitize leading -- to prevent CLI flag injection
+    prompt = prompt.lstrip()
+    if prompt.startswith("--"):
+        prompt = "- " + prompt
+
     data = load_tasks()
     if any(t["id"] == task_id for t in data["tasks"]):
         print(f"Error: task '{task_id}' already exists")
+        sys.exit(1)
+
+    if len(data["tasks"]) >= MAX_TASKS:
+        print(f"Error: task limit reached ({MAX_TASKS}). Remove a task first.")
         sys.exit(1)
 
     data["tasks"].append({

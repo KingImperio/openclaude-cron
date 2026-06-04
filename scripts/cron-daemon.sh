@@ -23,6 +23,15 @@ CRON_MAX_PAR="${CRON_MAX_CONCURRENT:-3}"
 CRON_RUNNING_DIR="$CRON_DATA_DIR/running"
 OPENCLAUDE_BIN="${OPENCLAUDE_BIN:-openclaude}"
 
+# Validate env vars are positive integers
+for _var in CRON_TICK:CRON_TICK_INTERVAL CRON_TIMEOUT:CRON_TIMEOUT CRON_MAX_PAR:CRON_MAX_CONCURRENT; do
+    _val="${_var%%:*}"; _env="${_var##*:}"
+    if ! [[ "$_val" =~ ^[0-9]+$ ]] || [ "$_val" -lt 1 ]; then
+        log_error "Invalid ${_env}='$_val' — must be a positive integer"
+        exit 1
+    fi
+done
+
 # Track child PIDs for clean shutdown
 declare -a CHILD_PIDS=()
 
