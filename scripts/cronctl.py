@@ -144,6 +144,14 @@ def cmd_add(args):
             if not step_part.isdigit() or int(step_part) < 1:
                 print(f"Error: invalid step '{step_part}' in field {i+1} — must be positive integer")
                 sys.exit(1)
+        # Check range size to prevent memory DoS
+        base = field.split('/')[0] if '/' in field else field
+        for segment in base.split(','):
+            if '-' in segment:
+                lo, hi = segment.split('-', 1)
+                if lo.isdigit() and hi.isdigit() and int(hi) - int(lo) > 1000:
+                    print(f"Error: range too large '{segment}' in field {i+1} (max 1000 values)")
+                    sys.exit(1)
 
     if len(prompt) > MAX_PROMPT_LENGTH:
         print(f"Error: prompt too long ({len(prompt)} chars, max {MAX_PROMPT_LENGTH})")
