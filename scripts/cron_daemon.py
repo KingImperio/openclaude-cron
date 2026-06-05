@@ -52,9 +52,11 @@ _validate_bin()
 TICK_INTERVAL = int(os.environ.get("CRON_TICK_INTERVAL", "60"))
 TASK_TIMEOUT = int(os.environ.get("CRON_TIMEOUT", "300"))
 MAX_CONCURRENT = int(os.environ.get("CRON_MAX_CONCURRENT", "3"))
+MAX_CATCHUP_TICKS = 10
 
 # ── State ──────────────────────────────────────────────────────────────────────
 running_tasks = {}  # task_id -> proc
+task_exit_codes = {}  # task_id -> exit code (populated on reap)
 shutdown_requested = False
 
 
@@ -186,16 +188,18 @@ def run_task(task_id, prompt):
 
 
 def reap_finished():
-    """Check for finished tasks and clean up."""
+    """Check for finished tasks, reap zombies, record exit codes."""
     finished = []
     for task_id, proc in running_tasks.items():
-        try:
-            os.kill(proc.pid, 0)
-        except OSError:
-            finished.append(task_id)
+        retcode = proc.poll()
+        if retcode is not None:
+            finished.append((task_id, retcode))
 
-    for task_id in finished:
+    for task_id, retcode in finished:
         del running_tasks[task_id]
+        task_exit_codes[task_id] = retcode
+        if retcode != 0:
+            print(f"WARN: Task '{task_id}' failed with exit code {retcode}", file=sys.stderr)
         # Update last_run with file locking
         try:
             data = load_tasks_locked()
@@ -272,10 +276,13 @@ def daemon_loop():
         now = time.time()
         elapsed = now - last_tick_time
 
-        # Calculate missed ticks for catch-up
+        # Calculate missed ticks for catch-up (capped to prevent runaway)
         missed_ticks = 0
         if elapsed > TICK_INTERVAL * 2:
             missed_ticks = int(elapsed / TICK_INTERVAL) - 1
+            if missed_ticks > MAX_CATCHUP_TICKS:
+                print(f"WARN: Capping catch-up from {missed_ticks} to {MAX_CATCHUP_TICKS} ticks", file=sys.stderr)
+                missed_ticks = MAX_CATCHUP_TICKS
             if missed_ticks > 0:
                 print(f"INFO: Catching up — {missed_ticks} missed tick(s) after {int(elapsed)}s gap", file=sys.stderr)
 
@@ -308,7 +315,8 @@ def daemon_loop():
                     if len(parts) == 3:
                         task_id, schedule, prompt = parts
                         # Decode escaped newlines/tabs from JSON helper
-                        prompt = prompt.replace("\\n", "\n").replace("\\t", "\t").replace("\\\\", "\\")
+                        # Order matters: decode backslashes first to avoid double-decode
+                        prompt = prompt.replace("\\\\", "\\").replace("\\n", "\n").replace("\\t", "\t")
                         run_task(task_id, prompt)
             except subprocess.TimeoutExpired:
                 print("WARN: JSON helper timed out", file=sys.stderr)
@@ -384,7 +392,12 @@ def cmd_start():
     devnull = os.open(os.devnull, os.O_RDWR)
     os.dup2(devnull, 0)
     os.dup2(devnull, 1)
-    os.dup2(devnull, 2)
+    # Redirect stderr to daemon log file (not /dev/null)
+    os.makedirs(LOG_DIR, mode=0o700, exist_ok=True)
+    daemon_log = os.path.join(LOG_DIR, "daemon.log")
+    log_fd = os.open(daemon_log, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    os.dup2(log_fd, 2)
+    os.close(log_fd)
 
     daemon_loop()
 
