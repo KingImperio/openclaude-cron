@@ -4,6 +4,24 @@ A persistent, cross-session cron scheduler for [OpenClaude](https://github.com/G
 
 Unlike the built-in `CronCreate`/`/loop` tools (which are session-scoped and expire after 7 days), OpenClaude Cron persists across session restarts and runs as an independent background daemon.
 
+## Quick Start
+
+```bash
+# Install
+git clone https://github.com/KingImperio/openclaude-cron.git ~/.claude/skills/cron
+
+# Start the daemon
+python3 ~/.claude/skills/cron/scripts/cronctl.py start
+
+# Add a task (human-readable schedule works!)
+python3 ~/.claude/skills/cron/scripts/cronctl.py add my-task "every 5 minutes" "check deploy status"
+
+# List tasks
+python3 ~/.claude/skills/cron/scripts/cronctl.py list
+```
+
+Then use `/cron` in your next OpenClaude session for the interactive menu.
+
 ## Features
 
 - **Persistent** — tasks survive session restarts (stored in `~/.openclaude/cron/cron-tasks.json`)
@@ -25,6 +43,16 @@ git clone https://github.com/KingImperio/openclaude-cron.git ~/.claude/skills/cr
 That's it. `/cron` is now available in your next OpenClaude session.
 
 **First-run setup:** On first use, the skill auto-configures `Bash(*)` in your permissions so cron tasks work as root without `--dangerously-skip-permissions`.
+
+### Alternative: install.sh (supports global/system-wide install)
+
+```bash
+git clone https://github.com/KingImperio/openclaude-cron.git ~/openclaude-cron
+cd ~/openclaude-cron
+./install.sh              # local install (~/.claude/skills/cron)
+./install.sh --global     # system-wide (/usr/local/share/claude/skills/cron)
+./install.sh --uninstall  # remove
+```
 
 ### Alternative: symlink (keeps repo updates separate)
 
@@ -54,12 +82,14 @@ Opens a full-screen menu where you can navigate with arrow keys and select actio
 /cron remove my-task
 /cron enable my-task
 /cron disable my-task
+/cron edit my-task --schedule "0 9 * * 1-5"  — Edit task schedule
 /cron run my-task                 — Execute a task now (one-shot)
 /cron start                       — Start background daemon
 /cron stop                        — Stop daemon
 /cron status                      — Check daemon status
 /cron log my-task                 — View task logs
 /cron test "*/15 * * * *"        — Test cron expression
+/cron suggest "every 30 minutes"  — Get cron expression from text
 /cron help                        — Show full usage docs
 ```
 
@@ -103,16 +133,15 @@ You don't need to know cron syntax. These all work:
     ├── cron_daemon.py              # Persistent Python daemon (main scheduler)
     ├── cron-interactive.py         # Arrow-key curses menu
     ├── cronctl.py                  # Task management CLI
-    ├── cron-helpers.sh             # Shared utilities (logging, PID, locking)
     ├── cron-parse.sh               # POSIX 5-field cron expression parser
-    └── cron_json_helper.py         # JSON operations + cron matching for daemon
+    ├── cron_json_helper.py         # JSON operations + cron matching for daemon
+    └── termux-boot-hook.sh         # Android auto-restart on boot
 
 ~/.openclaude/cron/
 ├── cron-tasks.json                 # Persistent task config
 ├── cron.pid                        # Daemon PID file
 ├── heartbeat                       # Last tick timestamp (health check)
-├── logs/                           # Per-task execution logs
-└── running/                        # PID markers for running tasks
+└── logs/                           # Per-task + daemon logs
 ```
 
 ## How It Works
@@ -156,8 +185,6 @@ Environment variables (optional):
 
 - Tasks run with `openclaude -p`. Only schedule prompts you trust — they execute with your full permissions.
 - The daemon runs as your user. Tasks have the same file access as your shell.
-- Task prompts are stored in plain text in `~/.openclaude/cron/cron-tasks.json`.
-- Logs may contain full AI output — be mindful of sensitive data.
 - Task prompts are stored in plain text in `~/.openclaude/cron/cron-tasks.json`.
 - Logs may contain full AI output — be mindful of sensitive data.
 

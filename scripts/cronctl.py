@@ -107,29 +107,6 @@ def modify_tasks(fn):
         lockf.close()
 
 
-def save_tasks(data):
-    os.makedirs(os.path.dirname(TASKS_FILE), exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(
-        dir=os.path.dirname(TASKS_FILE), suffix=".tmp"
-    )
-    try:
-        with os.fdopen(fd, "w") as f:
-            fcntl.flock(f, fcntl.LOCK_EX)
-            try:
-                json.dump(data, f, indent=2)
-                f.flush()
-                os.fsync(f.fileno())
-            finally:
-                fcntl.flock(f, fcntl.LOCK_UN)
-        os.replace(tmp_path, TASKS_FILE)
-    except Exception:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
-
-
 def valid_task_id(task_id):
     return bool(re.match(r'^[a-zA-Z0-9_-]{1,64}$', task_id))
 
@@ -229,11 +206,9 @@ def cmd_add(args):
 
     def _add(tasks):
         if any(t["id"] == task_id for t in tasks):
-            print(f"Error: task '{task_id}' already exists")
-            sys.exit(1)
+            raise ValueError(f"task '{task_id}' already exists")
         if len(tasks) >= MAX_TASKS:
-            print(f"Error: task limit reached ({MAX_TASKS}). Remove a task first.")
-            sys.exit(1)
+            raise ValueError(f"task limit reached ({MAX_TASKS}). Remove a task first.")
         tasks.append({
             "id": task_id,
             "schedule": schedule,
@@ -242,7 +217,11 @@ def cmd_add(args):
             "last_run": None,
         })
 
-    modify_tasks(_add)
+    try:
+        modify_tasks(_add)
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
     print(f"Added task '{task_id}' with schedule '{schedule}'")
 
 
@@ -257,11 +236,13 @@ def cmd_remove(args):
     def _remove(tasks):
         orig_len = len(tasks)
         tasks[:] = [t for t in tasks if t["id"] != task_id]
-        found[0] = len(tasks) < orig_len
+        if len(tasks) == orig_len:
+            raise ValueError(f"task '{task_id}' not found")
 
-    modify_tasks(_remove)
-    if not found[0]:
-        print(f"Error: task '{task_id}' not found")
+    try:
+        modify_tasks(_remove)
+    except ValueError as e:
+        print(f"Error: {e}")
         sys.exit(1)
     print(f"Removed task '{task_id}'")
 
@@ -281,18 +262,17 @@ def cmd_disable(args):
 
 
 def _set_enabled(task_id, enabled):
-    found = [False]
-
     def _toggle(tasks):
         for t in tasks:
             if t["id"] == task_id:
                 t["enabled"] = enabled
-                found[0] = True
                 return
+        raise ValueError(f"task '{task_id}' not found")
 
-    modify_tasks(_toggle)
-    if not found[0]:
-        print(f"Error: task '{task_id}' not found")
+    try:
+        modify_tasks(_toggle)
+    except ValueError as e:
+        print(f"Error: {e}")
         sys.exit(1)
     state = "enabled" if enabled else "disabled"
     print(f"Task '{task_id}' {state}")
@@ -312,10 +292,13 @@ def cmd_run(args):
             if t["id"] == task_id:
                 prompt[0] = t["prompt"]
                 return
-        raise SystemExit(f"Error: task '{task_id}' not found")
+        raise ValueError(f"task '{task_id}' not found")
 
-    modify_tasks(_get_prompt)
-    # prompt[0] is set or SystemExit was raised
+    try:
+        modify_tasks(_get_prompt)
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
 
     openclade_bin = os.environ.get("OPENCLAUDE_BIN", "openclaude")
     print(f"Running task '{task_id}'...")
@@ -365,6 +348,86 @@ def cmd_log(args):
 
     result = subprocess.run(["tail", "-n", str(lines), logfile], capture_output=True, text=True)
     print(result.stdout, end="")
+
+
+def cmd_suggest(args):
+    """Suggest cron expressions from human-readable descriptions."""
+    if not args:
+        print("Usage: cronctl.py suggest <description>")
+        print("Examples: 'every 5 minutes', 'daily', 'at 9am', 'weekdays'")
+        sys.exit(1)
+
+    text = " ".join(args)
+    result = parse_human_schedule(text)
+    if result:
+        print(f"  '{text}' -> {result}")
+    else:
+        print(f"  Could not parse '{text}'. Try: every N minutes/hours/days, daily, hourly, weekly, at HH:MM, at Nam/pm")
+
+
+def cmd_edit(args):
+    """Edit an existing task's schedule or prompt."""
+    if not args:
+        print("Usage: cronctl.py edit <id> [--schedule <expr>] [--prompt <text>]")
+        sys.exit(1)
+
+    task_id = args[0]
+    new_schedule = None
+    new_prompt = None
+
+    i = 1
+    while i < len(args):
+        if args[i] == "--schedule" and i + 1 < len(args):
+            new_schedule = args[i + 1]
+            i += 2
+        elif args[i] == "--prompt" and i + 1 < len(args):
+            new_prompt = args[i + 1]
+            i += 2
+        else:
+            print(f"Error: unknown flag '{args[i]}'")
+            sys.exit(1)
+
+    if new_schedule is None and new_prompt is None:
+        print("Error: specify --schedule and/or --prompt")
+        sys.exit(1)
+
+    # Validate schedule if provided
+    if new_schedule:
+        parsed = parse_human_schedule(new_schedule)
+        if parsed:
+            print(f"  Interpreted '{new_schedule}' as '{parsed}'")
+            new_schedule = parsed
+        fields = new_schedule.split()
+        if len(fields) != 5:
+            print(f"Error: cron expression must have 5 fields, got {len(fields)}")
+            sys.exit(1)
+
+    found = [False]
+
+    def _edit(tasks):
+        for t in tasks:
+            if t["id"] == task_id:
+                found[0] = True
+                if new_schedule:
+                    t["schedule"] = new_schedule
+                if new_prompt:
+                    if len(new_prompt) > MAX_PROMPT_LENGTH:
+                        raise ValueError(f"prompt too long ({len(new_prompt)} chars, max {MAX_PROMPT_LENGTH})")
+                    t["prompt"] = new_prompt
+                return
+        raise ValueError(f"task '{task_id}' not found")
+
+    try:
+        modify_tasks(_edit)
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+    print(f"Updated task '{task_id}'")
+    if new_schedule:
+        print(f"  Schedule: {new_schedule}")
+    if new_prompt:
+        print(f"  Prompt: {new_prompt[:80]}{'...' if len(new_prompt) > 80 else ''}")
 
 
 def cmd_test(args):
@@ -501,9 +564,11 @@ COMMANDS
   remove <id>                   Remove a task
   enable <id>                   Enable a task
   disable <id>                  Disable a task
+  edit <id> [--schedule S] [--prompt P]  Edit a task
   run <id>                      Execute a task now (one-shot)
   log <id> [lines]              View task logs (default: 20 lines)
   test <cron-expr>              Test a cron expression against current time
+  suggest <description>         Get cron expr from human-readable text
   start                         Start the background daemon
   stop                          Stop the background daemon
   status                        Check daemon status
@@ -551,6 +616,8 @@ def main():
         "run": lambda: cmd_run(args),
         "log": lambda: cmd_log(args),
         "test": lambda: cmd_test(args),
+        "suggest": lambda: cmd_suggest(args),
+        "edit": lambda: cmd_edit(args),
         "start": lambda: cmd_start(args),
         "stop": lambda: cmd_stop(args),
         "status": lambda: cmd_status(args),

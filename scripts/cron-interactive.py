@@ -18,6 +18,7 @@ TASKS_FILE = os.path.expanduser("~/.openclaude/cron/cron-tasks.json")
 MENU_ITEMS = [
     ("list",     "List all scheduled tasks"),
     ("add",      "Add a new task"),
+    ("edit",     "Edit a task"),
     ("remove",   "Remove a task"),
     ("enable",   "Enable a task"),
     ("disable",  "Disable a task"),
@@ -26,6 +27,7 @@ MENU_ITEMS = [
     ("status",   "Check daemon status"),
     ("logs",     "View task logs"),
     ("test",     "Test a cron expression"),
+    ("suggest",  "Get cron expr from text"),
     ("run",      "Run a task now (one-shot)"),
 ]
 
@@ -33,7 +35,7 @@ MENU_ITEMS = [
 NO_ARGS_ACTIONS = {"list", "start", "stop", "status"}
 
 # Actions that need a task ID selection
-NEEDS_TASK_ID = {"remove", "enable", "disable", "logs", "run"}
+NEEDS_TASK_ID = {"remove", "enable", "disable", "logs", "run", "edit"}
 
 
 def run_cronctl(*args):
@@ -335,6 +337,21 @@ def interactive_menu(stdscr):
                     continue
                 output = run_cronctl("log", task_id, lines)
                 show_output(stdscr, f"Logs: {task_id}", output)
+            elif action == "edit":
+                sched_prompt = CursesPrompt(stdscr, "New schedule (leave empty to keep)", "")
+                new_sched = sched_prompt.run()
+                prompt_prompt = CursesPrompt(stdscr, "New prompt (leave empty to keep)", "")
+                new_prompt = prompt_prompt.run()
+                args = [task_id]
+                if new_sched:
+                    args += ["--schedule", new_sched]
+                if new_prompt:
+                    args += ["--prompt", new_prompt]
+                if len(args) == 1:
+                    show_output(stdscr, "Edit", "No changes specified.")
+                else:
+                    output = run_cronctl("edit", *args)
+                    show_output(stdscr, f"Edit: {task_id}", output)
             elif action == "run":
                 # Actually execute the task, not add a duplicate
                 output = run_cronctl("run", task_id)
@@ -373,6 +390,16 @@ def interactive_menu(stdscr):
                 continue
             output = run_cronctl("test", expr)
             show_output(stdscr, "Test expression", output)
+            continue
+
+        # Suggest: needs human-readable description
+        if action == "suggest":
+            desc_prompt = CursesPrompt(stdscr, "Description", "every 5 minutes")
+            desc = desc_prompt.run()
+            if desc is None:
+                continue
+            output = run_cronctl("suggest", desc)
+            show_output(stdscr, "Suggest schedule", output)
             continue
 
 
